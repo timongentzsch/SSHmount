@@ -1,0 +1,100 @@
+name: SSHMount
+options:
+  bundleIdPrefix: com.sshmount
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "16.0"
+  minimumXcodeGenVersion: "2.38"
+
+settings:
+  SWIFT_VERSION: "6.0"
+  MACOSX_DEPLOYMENT_TARGET: "26.0"
+  CODE_SIGN_IDENTITY: "-"
+
+packages:
+  swift-argument-parser:
+    url: https://github.com/apple/swift-argument-parser
+    from: "1.3.0"
+
+schemes:
+  SSHMount:
+    build:
+      targets:
+        SSHMount: all
+    run:
+      config: Debug
+      preActions:
+        - script: |
+            # Clean unmount so fskitd releases the resource (avoids "Resource busy")
+            mount -t sshfs | awk '{print $3}' | xargs -I{} umount {} 2>/dev/null || true
+            sleep 1
+            rm -rf /Applications/SSHMount.app
+            cp -a "${BUILT_PRODUCTS_DIR}/SSHMount.app" /Applications/SSHMount.app
+            sudo pkill -9 fskitd 2>/dev/null || true
+            pkill -9 fskit_agent 2>/dev/null || true
+          name: Install & restart fskit_agent
+          settingsTarget: SSHMount
+
+targets:
+
+  # ── Menu Bar App (host) ──────────────────────────────
+  SSHMount:
+    type: application
+    platform: macOS
+    sources:
+      - App
+      - Shared
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.sshmount.app
+      INFOPLIST_FILE: App/Info.plist
+      CODE_SIGN_ENTITLEMENTS: App/SSHMount.entitlements
+      ENABLE_APP_SANDBOX: NO
+      ENABLE_HARDENED_RUNTIME: true
+      LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+    dependencies:
+      - target: SSHMountFS
+        embed: true
+        codeSign: true
+      - target: sshmount-cli
+        embed: true
+        codeSign: true
+
+  # ── FSKit ExtensionKit Extension (.appex) ────────────
+  SSHMountFS:
+    type: extensionkit-extension
+    platform: macOS
+    sources:
+      - Extension
+      - Shared
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.sshmount.app.fs
+      PRODUCT_NAME: SSHMountFS
+      INFOPLIST_FILE: Extension/Info.plist
+      CODE_SIGN_ENTITLEMENTS: Extension/SSHMountFS.entitlements
+      ENABLE_HARDENED_RUNTIME: true
+      HEADER_SEARCH_PATHS: /opt/homebrew/include
+      LIBRARY_SEARCH_PATHS: /opt/homebrew/lib
+      SWIFT_INCLUDE_PATHS: $(SRCROOT)/CLibSSH2
+      OTHER_LDFLAGS: -lssh2
+    frameworks:
+      - FSKit
+    dependencies: []
+
+  # ── CLI Tool ─────────────────────────────────────────
+  sshmount-cli:
+    type: tool
+    platform: macOS
+    sources:
+      - CLI
+      - Shared
+      - path: Extension/SFTPSession.swift
+        type: file
+    settings:
+      PRODUCT_NAME: sshmount
+      HEADER_SEARCH_PATHS: /opt/homebrew/include
+      LIBRARY_SEARCH_PATHS: /opt/homebrew/lib
+      SWIFT_INCLUDE_PATHS: $(SRCROOT)/CLibSSH2
+      OTHER_LDFLAGS: -lssh2
+    dependencies:
+      - package: swift-argument-parser
+        product: ArgumentParser
