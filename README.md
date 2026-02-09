@@ -55,6 +55,22 @@ Or build from terminal:
 xcodebuild -project SSHMount.xcodeproj -scheme SSHMount -configuration Debug -derivedDataPath .derivedData build
 ```
 
+## Development
+
+### FSKit Daemon Issues
+
+During development, FSKit can be unstable and may leave the extension in a dangling state (e.g., "Resource busy" errors after failed mounts). If you encounter issues after reinstalling the extension, restart the FSKit daemons:
+
+```bash
+sudo pkill -9 fskitd && pkill -9 fskit_agent
+```
+
+This kills both:
+- `fskitd` (system daemon, needs sudo) - clears cached resource state
+- `fskit_agent` (per-user daemon) - handles user-level operations
+
+`launchd` will automatically respawn both daemons. This is often necessary when testing mount/unmount cycles.
+
 ## Usage
 
 ### App
