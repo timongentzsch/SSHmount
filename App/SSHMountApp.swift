@@ -43,7 +43,7 @@ enum AggregateConnectionStatus {
 ///    → directly update mount health
 /// 2. **Mount table poll** (30s) → kernel mount existence (add/remove entries)
 ///
-/// The extension pings SSH every 1s and is the sole source of truth.
+/// The extension performs configurable SSH health checks and is the sole source of truth.
 /// The app never probes the filesystem or monitors the network.
 @MainActor
 final class MountManager: ObservableObject {

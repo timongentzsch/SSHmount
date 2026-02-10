@@ -3,8 +3,9 @@ import CLibSSH2
 
 /// Connection health monitor for the FSKit extension.
 ///
-/// Simple design: ping SSH every 1s via SFTP stat. If it fails, reconnect
-/// with exponential backoff (2, 4, 8, 16s cap). Never gives up.
+/// Probes SSH health via periodic SFTP stat checks. Reconnect starts only after
+/// a configurable number of consecutive probe failures, then retries with
+/// exponential backoff (2, 4, 8, 16s cap). Never gives up.
 final class ConnectionHealthMonitor: @unchecked Sendable {
 
     // MARK: - State Machine
@@ -64,13 +65,25 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
     private var keepaliveTimer: DispatchSourceTimer?
     private var reconnectTimer: DispatchSourceTimer?
     private var backoffSeconds: Double = 2
+    private var consecutiveKeepaliveFailures = 0
+    private let keepaliveIntervalSeconds: TimeInterval
+    private let requiredConsecutiveFailures: Int
     private static let maxBackoff: Double = 16
 
     // MARK: - Lifecycle
 
+    init(
+        keepaliveIntervalSeconds: TimeInterval = 1,
+        requiredConsecutiveFailures: Int = 3
+    ) {
+        self.keepaliveIntervalSeconds = max(1, keepaliveIntervalSeconds)
+        self.requiredConsecutiveFailures = max(1, requiredConsecutiveFailures)
+    }
+
     func start() {
         running = true
         backoffSeconds = 2
+        consecutiveKeepaliveFailures = 0
         state = .connected
         startKeepaliveTimer()
     }
@@ -88,6 +101,7 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
 
     func triggerReconnect() {
         guard state == .connected else { return }
+        consecutiveKeepaliveFailures = 0
         state = .reconnecting
         stopKeepaliveTimer()
         scheduleReconnect()
@@ -110,16 +124,26 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
         return _state == .connected
     }
 
-    // MARK: - Keepalive Timer (1s)
+    // MARK: - Keepalive Timer
 
     private func startKeepaliveTimer() {
         stopKeepaliveTimer()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.schedule(deadline: .now() + keepaliveIntervalSeconds, repeating: keepaliveIntervalSeconds)
         timer.setEventHandler { [weak self] in
             guard let self, self.state == .connected,
                   let sendKeepalive = self.onSendKeepalive else { return }
-            if !sendKeepalive() {
+            if sendKeepalive() {
+                self.consecutiveKeepaliveFailures = 0
+                return
+            }
+
+            self.consecutiveKeepaliveFailures += 1
+            Log.sftp.notice(
+                "ConnectionHealth: keepalive failure \(self.consecutiveKeepaliveFailures, privacy: .public)/\(self.requiredConsecutiveFailures, privacy: .public)"
+            )
+
+            if self.consecutiveKeepaliveFailures >= self.requiredConsecutiveFailures {
                 self.triggerReconnect()
             }
         }

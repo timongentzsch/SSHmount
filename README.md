@@ -123,6 +123,10 @@ sshmount unmount ~/Volumes/my-server
 - `parallel_sessions=<n>` (1-8, default 1; enables parallel read sessions)
 - `parallel_write_sessions=<n>` (1-8, default 1; enables parallel write sessions, path-sticky to preserve per-file ordering)
 - `nonblocking_io=yes|no` (default yes; enables non-blocking SFTP read/write loops on dedicated I/O sessions)
+- `keepalive_interval=<seconds>` (default 1; health-check probe interval)
+- `keepalive_timeout=<seconds>` (default 3; timeout per health-check probe)
+- `keepalive_failures=<n>` (default 3; reconnect after N consecutive failed probes)
+- `max_pending_ops=<n>` (16-4096, default 256; apply backpressure to avoid unbounded queued FS ops)
 
 Notes:
 - `nodev` is explicitly unsupported.
@@ -140,6 +144,12 @@ Recommended starting point for high-throughput links:
 
 Tune `parallel_sessions` and `parallel_write_sessions` based on workload and server capacity.
 Too many sessions can reduce performance on constrained servers.
+
+For constrained or unstable links, start with lower concurrency and less aggressive health checks:
+
+```bash
+-o parallel_sessions=1,parallel_write_sessions=1,nonblocking_io=no,keepalive_timeout=8,keepalive_failures=5,max_pending_ops=128,cache_timeout=15,dir_cache_timeout=15
+```
 
 ## Important note about Git over SSHFS
 

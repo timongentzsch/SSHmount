@@ -357,7 +357,7 @@ final class SFTPSession: @unchecked Sendable {
             }
 
             // 7. Disable libssh2's built-in keepalive — ConnectionHealthMonitor
-            //    sends its own every 1s with a 3s timeout for fast detection.
+            //    runs explicit SFTP probes with configurable interval/timeout.
             ssh2_keepalive_config(session, 0, 0)
 
             // Dedicated I/O sessions can run in non-blocking mode with EAGAIN/poll loops.
@@ -424,12 +424,11 @@ final class SFTPSession: @unchecked Sendable {
     // MARK: - Connection Status & Reconnect
 
     /// Probe whether the connection is alive by doing an actual SFTP round-trip.
-    /// An SFTP stat on "." requires the server to reply — with a 3s timeout it
-    /// reliably detects dead connections (unlike `ssh2_keepalive_send` which only
-    /// pushes into the TCP buffer without waiting for a response).
-    func sendKeepalive() -> Bool {
+    /// An SFTP stat on "." requires the server to reply.
+    func sendKeepalive(timeoutMs: Int32 = 3_000) -> Bool {
         guard let session = sshSession, let sftp = sftpSession else { return false }
-        ssh2_session_set_timeout(session, 3_000)
+        let effectiveTimeout = max(1_000, timeoutMs)
+        ssh2_session_set_timeout(session, Int(effectiveTimeout))
         defer { ssh2_session_set_timeout(session, 10_000) }
         var attrs = LIBSSH2_SFTP_ATTRIBUTES()
         return libssh2_sftp_stat_ex(sftp, ".", 1, LIBSSH2_SFTP_STAT, &attrs) == 0

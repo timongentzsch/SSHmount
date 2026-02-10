@@ -22,7 +22,19 @@ final class SSHMountVolume: FSVolume,
 
     /// Dispatch work onto the serial SFTP queue without introducing additional Sendable constraints.
     private func enqueueSFTPOperation(_ work: @escaping () -> Void) {
-        sftpQueue.async(execute: DispatchWorkItem(block: work))
+        enqueueOperation(on: sftpQueue, work)
+    }
+
+    /// Global queue backpressure so overload does not create an unbounded async backlog.
+    private let pendingOperationSemaphore: DispatchSemaphore
+
+    private func enqueueOperation(on queue: DispatchQueue, _ work: @escaping () -> Void) {
+        pendingOperationSemaphore.wait()
+        let semaphore = pendingOperationSemaphore
+        queue.async(execute: DispatchWorkItem(block: {
+            defer { semaphore.signal() }
+            work()
+        }))
     }
 
     /// Dedicated I/O worker with its own SSH/SFTP session and serial queue.
@@ -91,6 +103,7 @@ final class SSHMountVolume: FSVolume,
         }
         self.remotePath = remotePath
         self.mountOpts = options
+        self.pendingOperationSemaphore = DispatchSemaphore(value: options.maxPendingOperations)
         self.healthMonitor = healthMonitor
         super.init(volumeID: volumeID, volumeName: volumeName)
         setupHealthMonitor()
@@ -99,7 +112,8 @@ final class SSHMountVolume: FSVolume,
     private func setupHealthMonitor() {
         healthMonitor.onSendKeepalive = { [weak self] in
             guard let self else { return false }
-            return self.sftpQueue.sync { self.sftp.sendKeepalive() }
+            let timeoutMs = Int32((self.mountOpts.keepaliveTimeout * 1000).rounded())
+            return self.sftpQueue.sync { self.sftp.sendKeepalive(timeoutMs: timeoutMs) }
         }
 
         healthMonitor.onReconnectNeeded = { [weak self] in
@@ -186,9 +200,9 @@ final class SSHMountVolume: FSVolume,
         let worker = readWorkers[index]
         readWorkerLock.unlock()
 
-        worker.queue.async(execute: DispatchWorkItem(block: {
+        enqueueOperation(on: worker.queue, {
             work(worker.sftp)
-        }))
+        })
     }
 
     private func enqueueWriteOperation(path: String, _ work: @escaping (_ session: SFTPSession) -> Void) {
@@ -209,9 +223,9 @@ final class SSHMountVolume: FSVolume,
             worker = writeWorkers[Int(hash % UInt64(writeWorkers.count))]
         }
 
-        worker.queue.async(execute: DispatchWorkItem(block: {
+        enqueueOperation(on: worker.queue, {
             work(worker.sftp)
-        }))
+        })
     }
 
     private func withIOSessionReconnect<T>(_ session: SFTPSession, op: () throws -> T) throws -> T {

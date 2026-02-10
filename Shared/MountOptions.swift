@@ -32,6 +32,14 @@ struct MountOptions: Sendable {
     let parallelWriteSessions: Int
     /// Enable non-blocking libssh2 I/O loops for dedicated read/write sessions (nonblocking_io=yes/no, default yes).
     let nonBlockingIO: Bool
+    /// Health-check probe interval in seconds (keepalive_interval=N, default 1).
+    let keepaliveInterval: TimeInterval
+    /// Health-check probe timeout in seconds (keepalive_timeout=N, default 3).
+    let keepaliveTimeout: TimeInterval
+    /// Consecutive health-check failures before triggering reconnect (keepalive_failures=N, default 3).
+    let keepaliveFailures: Int
+    /// Maximum number of queued FS operations before applying backpressure (max_pending_ops=N, default 256).
+    let maxPendingOperations: Int
     /// Session-only password auth fallback (auth_password=...); never persisted to saved config.
     let authPassword: String?
 
@@ -56,6 +64,10 @@ struct MountOptions: Sendable {
         parallelSessions = min(8, max(1, Self.intOpt(dict, "parallel_sessions") ?? 1))
         parallelWriteSessions = min(8, max(1, Self.intOpt(dict, "parallel_write_sessions") ?? 1))
         nonBlockingIO = Self.boolOpt(dict, "nonblocking_io", defaultValue: true)
+        keepaliveInterval = TimeInterval(min(300, max(1, Self.intOpt(dict, "keepalive_interval") ?? 1)))
+        keepaliveTimeout = TimeInterval(min(120, max(1, Self.intOpt(dict, "keepalive_timeout") ?? 3)))
+        keepaliveFailures = max(1, Self.intOpt(dict, "keepalive_failures") ?? 3)
+        maxPendingOperations = min(4096, max(16, Self.intOpt(dict, "max_pending_ops") ?? 256))
         authPassword = dict["auth_password"]?.isEmpty == false ? dict["auth_password"] : nil
 
         if let umaskStr = dict["umask"], let val = UInt32(umaskStr, radix: 8) {

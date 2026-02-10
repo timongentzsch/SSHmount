@@ -123,7 +123,10 @@ final class SSHMountFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
 
         // Create the health monitor
-        let monitor = ConnectionHealthMonitor()
+        let monitor = ConnectionHealthMonitor(
+            keepaliveIntervalSeconds: mountOpts.keepaliveInterval,
+            requiredConsecutiveFailures: mountOpts.keepaliveFailures
+        )
 
         // Optional extra read sessions for parallel read throughput.
         // Each session has its own serial queue in SSHMountVolume.
