@@ -7,13 +7,13 @@ struct MountRequest: Codable, Sendable {
     let localPath: String
     /// User-facing label used as mount point directory name (Finder display name).
     let label: String?
-    /// Comma-separated mount options passed via URL query parameters.
-    let mountOptions: String?
+    /// Canonical typed options encoded as URL query parameters.
+    let options: MountOptions?
     /// Session-only password. Not persisted in saved config.
     let sessionPassword: String?
 
     private enum CodingKeys: String, CodingKey {
-        case hostAlias, remotePath, localPath, label, mountOptions
+        case hostAlias, remotePath, localPath, label, options
     }
 
     init(
@@ -21,14 +21,14 @@ struct MountRequest: Codable, Sendable {
         remotePath: String,
         localPath: String,
         label: String?,
-        mountOptions: String?,
+        options: MountOptions?,
         sessionPassword: String?
     ) {
         self.hostAlias = hostAlias
         self.remotePath = remotePath
         self.localPath = localPath
         self.label = label
-        self.mountOptions = mountOptions
+        self.options = options
         self.sessionPassword = sessionPassword
     }
 
@@ -38,7 +38,7 @@ struct MountRequest: Codable, Sendable {
         remotePath = try c.decode(String.self, forKey: .remotePath)
         localPath = try c.decode(String.self, forKey: .localPath)
         label = try c.decodeIfPresent(String.self, forKey: .label)
-        mountOptions = try c.decodeIfPresent(String.self, forKey: .mountOptions)
+        options = try c.decodeIfPresent(MountOptions.self, forKey: .options)
         sessionPassword = nil
     }
 
@@ -48,7 +48,7 @@ struct MountRequest: Codable, Sendable {
         try c.encode(remotePath, forKey: .remotePath)
         try c.encode(localPath, forKey: .localPath)
         try c.encodeIfPresent(label, forKey: .label)
-        try c.encodeIfPresent(mountOptions, forKey: .mountOptions)
+        try c.encodeIfPresent(options, forKey: .options)
     }
 
     /// Parse "alias:/path" into components.
@@ -69,7 +69,7 @@ struct MountRequest: Codable, Sendable {
             remotePath: path,
             localPath: localPath,
             label: nil,
-            mountOptions: nil,
+            options: nil,
             sessionPassword: nil
         )
     }
@@ -77,37 +77,17 @@ struct MountRequest: Codable, Sendable {
     /// Build the FSKit resource URL consumed by `mount -F -t sshfs`.
     func resourceURLString() -> String {
         var urlString = "ssh://\(hostAlias)/\(remotePath)"
-        if let query = Self.encodedQuery(from: mountOptions, sessionPassword: sessionPassword), !query.isEmpty {
+        if let query = Self.encodedQuery(from: options, sessionPassword: sessionPassword), !query.isEmpty {
             urlString += "?\(query)"
         }
         return urlString
     }
 
-    private static func encodedQuery(from options: String?, sessionPassword: String?) -> String? {
-        var queryItems: [URLQueryItem] = []
-
-        if let options {
-            let parts = options
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-
-            for part in parts {
-                if let eq = part.firstIndex(of: "=") {
-                    let key = String(part[..<eq]).trimmingCharacters(in: .whitespaces)
-                    let value = String(part[part.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-                    guard !key.isEmpty else { continue }
-                    queryItems.append(URLQueryItem(name: key, value: value))
-                } else {
-                    queryItems.append(URLQueryItem(name: part, value: nil))
-                }
-            }
-        }
-
-        if let sessionPassword, !sessionPassword.isEmpty {
-            queryItems.append(URLQueryItem(name: "auth_password", value: sessionPassword))
-        }
-
+    private static func encodedQuery(from options: MountOptions?, sessionPassword: String?) -> String? {
+        let queryDict = (options ?? .defaultStandard).asQueryDictionary(sessionPassword: sessionPassword)
+        let queryItems = queryDict
+            .sorted { $0.key < $1.key }
+            .map { URLQueryItem(name: $0.key, value: $0.value) }
         guard !queryItems.isEmpty else { return nil }
         var components = URLComponents()
         components.queryItems = queryItems
@@ -121,6 +101,8 @@ enum MountError: LocalizedError {
     case authFailed(String)
     case mountFailed(String)
     case sftpError(String)
+    /// SFTP error with numeric code for better POSIX error mapping.
+    case sftpCodedError(String, code: UInt)
 
     var errorDescription: String? {
         switch self {
@@ -129,7 +111,20 @@ enum MountError: LocalizedError {
         case .authFailed(let msg): "Authentication failed: \(msg)"
         case .mountFailed(let msg): "Mount failed: \(msg)"
         case .sftpError(let msg): "SFTP error: \(msg)"
+        case .sftpCodedError(let msg, _): "SFTP error: \(msg)"
         }
+    }
+
+    /// Map an SFTP error code to the most appropriate POSIX error.
+    var posixErrorCode: POSIXErrorCode {
+        guard case .sftpCodedError(_, let code) = self else { return .EIO }
+        return SFTPErrorCode(rawValue: code)?.posixCode ?? .EIO
+    }
+
+    /// Whether this is an authentication failure.
+    var isAuthError: Bool {
+        if case .authFailed = self { return true }
+        return false
     }
 
     static func isAlreadyUnmountedMessage(_ stderr: String) -> Bool {
@@ -146,6 +141,11 @@ enum MountError: LocalizedError {
             || normalized.contains("in use")
     }
 
+    static let daemonRecoveryCommand = "sudo pkill -9 fskitd && pkill -9 fskit_agent"
+    static var daemonRecoveryHint: String {
+        "If this mount is still stuck, restart FSKit daemons: \(daemonRecoveryCommand)"
+    }
+
     static func unmountFailureMessage(localPath: String, stderr: String, exitCode: Int32) -> String {
         let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         if isBusyUnmountMessage(trimmed) {
@@ -156,5 +156,87 @@ enum MountError: LocalizedError {
             return "umount exited with code \(exitCode)"
         }
         return trimmed
+    }
+}
+
+/// SSH_FX_* error codes from the SFTP protocol (draft-ietf-secsh-filexfer).
+enum SFTPErrorCode: UInt, Sendable {
+    case ok                 = 0
+    case eof                = 1
+    case noSuchFile         = 2
+    case permissionDenied   = 3
+    case failure            = 4
+    case badMessage         = 5
+    case noConnection       = 6
+    case connectionLost     = 7
+    case opUnsupported      = 8
+    case invalidHandle      = 9
+    case noSuchPath         = 10
+    case fileAlreadyExists  = 11
+    case writeProtect       = 12
+    case noMedia            = 13
+    case noSpaceOnFilesystem = 14
+    case quotaExceeded      = 15
+    case unknownPrincipal   = 16
+    case lockConflict       = 17
+    case dirNotEmpty        = 18
+    case notADirectory      = 19
+    case invalidFilename    = 20
+    case linkLoop           = 21
+
+    /// Map SFTP error code to the most appropriate POSIX error.
+    /// Returns nil for non-error codes (ok, eof).
+    var posixCode: POSIXErrorCode? {
+        switch self {
+        case .ok:                   return nil
+        case .eof:                  return nil
+        case .noSuchFile:           return .ENOENT
+        case .permissionDenied:     return .EACCES
+        case .failure:              return .EIO
+        case .badMessage:           return .EINVAL
+        case .noConnection:         return .ENOTCONN
+        case .connectionLost:       return .ECONNRESET
+        case .opUnsupported:        return .ENOTSUP
+        case .invalidHandle:        return .EBADF
+        case .noSuchPath:           return .ENOENT
+        case .fileAlreadyExists:    return .EEXIST
+        case .writeProtect:         return .EROFS
+        case .noMedia:              return .ENXIO
+        case .noSpaceOnFilesystem:  return .ENOSPC
+        case .quotaExceeded:        return .EDQUOT
+        case .unknownPrincipal:     return .EACCES
+        case .lockConflict:         return .EAGAIN
+        case .dirNotEmpty:          return .ENOTEMPTY
+        case .notADirectory:        return .ENOTDIR
+        case .invalidFilename:      return .EINVAL
+        case .linkLoop:             return .ELOOP
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .ok:                   return "SSH_FX_OK"
+        case .eof:                  return "SSH_FX_EOF"
+        case .noSuchFile:           return "SSH_FX_NO_SUCH_FILE"
+        case .permissionDenied:     return "SSH_FX_PERMISSION_DENIED"
+        case .failure:              return "SSH_FX_FAILURE"
+        case .badMessage:           return "SSH_FX_BAD_MESSAGE"
+        case .noConnection:         return "SSH_FX_NO_CONNECTION"
+        case .connectionLost:       return "SSH_FX_CONNECTION_LOST"
+        case .opUnsupported:        return "SSH_FX_OP_UNSUPPORTED"
+        case .invalidHandle:        return "SSH_FX_INVALID_HANDLE"
+        case .noSuchPath:           return "SSH_FX_NO_SUCH_PATH"
+        case .fileAlreadyExists:    return "SSH_FX_FILE_ALREADY_EXISTS"
+        case .writeProtect:         return "SSH_FX_WRITE_PROTECT"
+        case .noMedia:              return "SSH_FX_NO_MEDIA"
+        case .noSpaceOnFilesystem:  return "SSH_FX_NO_SPACE_ON_FILESYSTEM"
+        case .quotaExceeded:        return "SSH_FX_QUOTA_EXCEEDED"
+        case .unknownPrincipal:     return "SSH_FX_UNKNOWN_PRINCIPAL"
+        case .lockConflict:         return "SSH_FX_LOCK_CONFLICT"
+        case .dirNotEmpty:          return "SSH_FX_DIR_NOT_EMPTY"
+        case .notADirectory:        return "SSH_FX_NOT_A_DIRECTORY"
+        case .invalidFilename:      return "SSH_FX_INVALID_FILENAME"
+        case .linkLoop:             return "SSH_FX_LINK_LOOP"
+        }
     }
 }

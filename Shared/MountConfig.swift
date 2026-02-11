@@ -8,14 +8,11 @@ struct MountConfig: Codable, Identifiable, Sendable {
     var remotePath: String
     var localPath: String
     var mountOnLaunch: Bool
-    /// Comma-separated mount options passed via URL query parameters.
-    var mountOptions: String
+    /// Canonical typed mount/runtime options.
+    var options: MountOptions
 
     private enum CodingKeys: String, CodingKey {
-        case id, label, hostAlias, remotePath, localPath, mountOnLaunch, mountOptions
-
-        // Legacy keys used by older builds.
-        case host, user, port, password, sftpOptions
+        case id, label, hostAlias, remotePath, localPath, mountOnLaunch, options
     }
 
     init(
@@ -25,7 +22,7 @@ struct MountConfig: Codable, Identifiable, Sendable {
         remotePath: String,
         localPath: String,
         mountOnLaunch: Bool = false,
-        mountOptions: String = ""
+        options: MountOptions = .defaultStandard
     ) {
         self.id = id
         self.label = label.isEmpty ? "\(hostAlias):\(remotePath)" : label
@@ -33,22 +30,18 @@ struct MountConfig: Codable, Identifiable, Sendable {
         self.remotePath = remotePath
         self.localPath = localPath
         self.mountOnLaunch = mountOnLaunch
-        self.mountOptions = mountOptions
+        self.options = options
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
 
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-
-        let decodedHostAlias = try c.decodeIfPresent(String.self, forKey: .hostAlias)
-        let legacyHost = try c.decodeIfPresent(String.self, forKey: .host)
-
-        hostAlias = decodedHostAlias ?? legacyHost ?? ""
+        hostAlias = try c.decode(String.self, forKey: .hostAlias)
         remotePath = try c.decode(String.self, forKey: .remotePath)
         localPath = try c.decode(String.self, forKey: .localPath)
         mountOnLaunch = try c.decodeIfPresent(Bool.self, forKey: .mountOnLaunch) ?? false
-        mountOptions = try c.decodeIfPresent(String.self, forKey: .mountOptions) ?? ""
+        options = try c.decodeIfPresent(MountOptions.self, forKey: .options) ?? .defaultStandard
 
         let decodedLabel = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
         label = decodedLabel.isEmpty ? "\(hostAlias):\(remotePath)" : decodedLabel
@@ -62,7 +55,7 @@ struct MountConfig: Codable, Identifiable, Sendable {
         try c.encode(remotePath, forKey: .remotePath)
         try c.encode(localPath, forKey: .localPath)
         try c.encode(mountOnLaunch, forKey: .mountOnLaunch)
-        try c.encode(mountOptions, forKey: .mountOptions)
+        try c.encode(options, forKey: .options)
     }
 
     func toRequest(sessionPassword: String? = nil) -> MountRequest {
@@ -71,7 +64,7 @@ struct MountConfig: Codable, Identifiable, Sendable {
             remotePath: remotePath,
             localPath: localPath,
             label: label,
-            mountOptions: mountOptions.isEmpty ? nil : mountOptions,
+            options: options,
             sessionPassword: sessionPassword
         )
     }

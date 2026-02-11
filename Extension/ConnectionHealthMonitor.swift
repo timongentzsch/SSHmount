@@ -1,25 +1,35 @@
 import Foundation
 import CLibSSH2
 
-/// Connection health monitor for the FSKit extension.
+/// Load-aware connection health monitor for the FSKit extension.
 ///
-/// Probes SSH health via periodic SFTP stat checks. Reconnect starts only after
-/// a configurable number of consecutive probe failures, then retries with
-/// exponential backoff (2, 4, 8, 16s cap). Never gives up.
+/// State transitions:
+/// - connected -> suspect: probe failures while transport may still be healthy.
+/// - suspect -> reconnecting: sustained idle failures.
+/// - reconnecting -> connected: reconnect callback succeeds.
 final class ConnectionHealthMonitor: @unchecked Sendable {
 
     // MARK: - State Machine
 
     enum State: Sendable, CustomStringConvertible {
         case connected
+        case suspect
         case reconnecting
 
         var description: String {
             switch self {
-            case .connected:    "connected"
+            case .connected: "connected"
+            case .suspect: "suspect"
             case .reconnecting: "reconnecting"
             }
         }
+    }
+
+    enum ReconnectReason: String, Sendable {
+        case probeTimeout = "probe_timeout"
+        case transportError = "transport_error"
+        case workerExhausted = "worker_exhausted"
+        case manualTrigger = "manual_trigger"
     }
 
     // MARK: - Properties
@@ -44,108 +54,160 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
             _state = newValue
             stateCondition.broadcast()
             stateCondition.unlock()
-            Log.sftp.notice("ConnectionHealth: \(old.description, privacy: .public) → \(newValue.description, privacy: .public)")
+
+            Log.sftp.notice("ConnectionHealth: \(old.description, privacy: .public) -> \(newValue.description, privacy: .public)")
             onStateChanged?(newValue)
-            notify_post(newValue == .connected
-                ? "com.sshmount.state.connected"
-                : "com.sshmount.state.reconnecting")
+
+            if newValue == .connected {
+                notify_post("com.sshmount.state.connected")
+            } else if newValue == .reconnecting {
+                notify_post("com.sshmount.state.reconnecting")
+            }
         }
     }
 
-    /// Called on state transitions. Set by SSHMountVolume to flush caches on reconnect.
     var onStateChanged: ((State) -> Void)?
+    var onReconnectNeeded: ((ReconnectReason) -> Bool)?
+    var onSendSSHKeepalive: ((Int32) -> Bool)?
+    var onSendSFTPProbe: ((Int32) -> Bool)?
 
-    /// Called when reconnection should be attempted. Set by SSHMountVolume.
-    var onReconnectNeeded: (() -> Bool)?
-
-    /// Called to probe SSH connection health. Returns false if connection is dead.
-    var onSendKeepalive: (() -> Bool)?
-
-    private let queue = DispatchQueue(label: "com.sshmount.health-monitor")
+    private let queue = DispatchQueue(label: "com.sshmount.health-monitor", qos: .utility)
     private var keepaliveTimer: DispatchSourceTimer?
     private var reconnectTimer: DispatchSourceTimer?
+    private var snapshotTimer: DispatchSourceTimer?
+
     private var backoffSeconds: Double = 2
-    private var consecutiveKeepaliveFailures = 0
-    private let keepaliveIntervalSeconds: TimeInterval
+    private var consecutiveFailures = 0
+    private var inflightOperations = 0
+    private var lastSuccessfulIOAt: Date?
+    private var probeRttEwmaMs: Double?
+    private var queueWaitEwmaMs: Double?
+    private var lastReconnectReason: ReconnectReason?
+
+    private let healthIntervalSeconds: TimeInterval
+    private let healthTimeoutSeconds: TimeInterval
     private let requiredConsecutiveFailures: Int
+    private let busyThreshold: Int
+    private let graceSeconds: TimeInterval
     private static let maxBackoff: Double = 16
 
     // MARK: - Lifecycle
 
     init(
-        keepaliveIntervalSeconds: TimeInterval = 1,
-        requiredConsecutiveFailures: Int = 3
+        healthIntervalSeconds: TimeInterval = 5,
+        healthTimeoutSeconds: TimeInterval = 10,
+        requiredConsecutiveFailures: Int = 5,
+        busyThreshold: Int = 32,
+        graceSeconds: TimeInterval = 20
     ) {
-        self.keepaliveIntervalSeconds = max(1, keepaliveIntervalSeconds)
+        self.healthIntervalSeconds = max(1, healthIntervalSeconds)
+        self.healthTimeoutSeconds = max(1, healthTimeoutSeconds)
         self.requiredConsecutiveFailures = max(1, requiredConsecutiveFailures)
+        self.busyThreshold = max(1, busyThreshold)
+        self.graceSeconds = max(0, graceSeconds)
     }
 
     func start() {
-        running = true
-        backoffSeconds = 2
-        consecutiveKeepaliveFailures = 0
-        state = .connected
-        startKeepaliveTimer()
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.running = true
+            self.backoffSeconds = 2
+            self.consecutiveFailures = 0
+            self.inflightOperations = 0
+            self.lastSuccessfulIOAt = Date()
+            self.state = .connected
+            self.startKeepaliveTimer()
+            self.startSnapshotTimer()
+        }
     }
 
     func stop() {
-        running = false
-        stopKeepaliveTimer()
-        stopReconnectTimer()
-        stateCondition.lock()
-        stateCondition.broadcast()
-        stateCondition.unlock()
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.running = false
+            self.stopKeepaliveTimer()
+            self.stopReconnectTimer()
+            self.stopSnapshotTimer()
+            self.stateCondition.lock()
+            self.stateCondition.broadcast()
+            self.stateCondition.unlock()
+        }
+    }
+
+    // MARK: - Operation Tracking
+
+    func recordOperationStart() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.inflightOperations += 1
+        }
+    }
+
+    func recordOperationResult(success: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.inflightOperations = max(0, self.inflightOperations - 1)
+            if success {
+                self.lastSuccessfulIOAt = Date()
+                self.consecutiveFailures = 0
+                if self.state == .suspect {
+                    self.state = .connected
+                }
+            }
+        }
+    }
+
+    func recordQueueWait(milliseconds: Double, saturated: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let alpha = 0.2
+            if let current = self.queueWaitEwmaMs {
+                self.queueWaitEwmaMs = current * (1 - alpha) + milliseconds * alpha
+            } else {
+                self.queueWaitEwmaMs = milliseconds
+            }
+            if saturated {
+                Log.sftp.notice("ConnectionHealth: queue saturation at \(milliseconds, privacy: .public)ms wait")
+            }
+        }
     }
 
     // MARK: - Reconnect Trigger
 
-    func triggerReconnect() {
-        guard state == .connected else { return }
-        consecutiveKeepaliveFailures = 0
-        state = .reconnecting
-        stopKeepaliveTimer()
-        scheduleReconnect()
+    func triggerReconnect(reason: ReconnectReason = .manualTrigger) {
+        queue.async { [weak self] in
+            guard let self, self.running, self.state != .reconnecting else { return }
+            self.lastReconnectReason = reason
+            notify_post("com.sshmount.reconnect.reason.\(reason.rawValue)")
+            self.state = .reconnecting
+            self.stopKeepaliveTimer()
+            self.scheduleReconnect(reason: reason)
+        }
     }
 
     // MARK: - Wait for Connected
 
-    /// Block the calling thread until state becomes `.connected` or timeout expires.
     func waitForConnected(timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         stateCondition.lock()
         defer { stateCondition.unlock() }
 
         while _state != .connected && running {
-            let remaining = deadline.timeIntervalSinceNow
-            if remaining <= 0 { return false }
+            if deadline.timeIntervalSinceNow <= 0 { return false }
             stateCondition.wait(until: deadline)
         }
 
         return _state == .connected
     }
 
-    // MARK: - Keepalive Timer
+    // MARK: - Keepalive
 
     private func startKeepaliveTimer() {
         stopKeepaliveTimer()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + keepaliveIntervalSeconds, repeating: keepaliveIntervalSeconds)
+        timer.schedule(deadline: .now() + healthIntervalSeconds, repeating: healthIntervalSeconds)
         timer.setEventHandler { [weak self] in
-            guard let self, self.state == .connected,
-                  let sendKeepalive = self.onSendKeepalive else { return }
-            if sendKeepalive() {
-                self.consecutiveKeepaliveFailures = 0
-                return
-            }
-
-            self.consecutiveKeepaliveFailures += 1
-            Log.sftp.notice(
-                "ConnectionHealth: keepalive failure \(self.consecutiveKeepaliveFailures, privacy: .public)/\(self.requiredConsecutiveFailures, privacy: .public)"
-            )
-
-            if self.consecutiveKeepaliveFailures >= self.requiredConsecutiveFailures {
-                self.triggerReconnect()
-            }
+            self?.evaluateKeepalive()
         }
         timer.resume()
         keepaliveTimer = timer
@@ -156,37 +218,132 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
         keepaliveTimer = nil
     }
 
-    // MARK: - Exponential Backoff Reconnect
+    private func evaluateKeepalive() {
+        guard running, state != .reconnecting, let sendKeepalive = onSendSSHKeepalive else { return }
 
-    private func scheduleReconnect() {
+        let timeoutMs = Int32((healthTimeoutSeconds * 1000).rounded())
+        let start = Date()
+        let keepaliveOK = sendKeepalive(timeoutMs)
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
+        updateProbeRTT(elapsedMs)
+
+        if keepaliveOK {
+            consecutiveFailures = 0
+            state = .connected
+            return
+        }
+
+        if self.state == .connected {
+            self.state = .suspect
+        }
+
+        if let sendSFTPProbe = self.onSendSFTPProbe {
+            let sftpProbeOK = sendSFTPProbe(timeoutMs)
+            if sftpProbeOK {
+                self.consecutiveFailures = 0
+                self.state = .connected
+                return
+            }
+        }
+
+        if self.shouldSuppressEscalation() {
+            Log.sftp.notice("ConnectionHealth: probe failure suppressed (inflight \(self.inflightOperations, privacy: .public), grace \(self.graceSeconds, privacy: .public)s)")
+            return
+        }
+
+        self.consecutiveFailures += 1
+        Log.sftp.notice("ConnectionHealth: hard probe failure \(self.consecutiveFailures, privacy: .public)/\(self.requiredConsecutiveFailures, privacy: .public)")
+
+        if self.consecutiveFailures >= self.requiredConsecutiveFailures {
+            self.triggerReconnect(reason: .probeTimeout)
+        }
+    }
+
+    private func shouldSuppressEscalation() -> Bool {
+        if inflightOperations >= busyThreshold {
+            return true
+        }
+        if let lastSuccessfulIOAt, Date().timeIntervalSince(lastSuccessfulIOAt) <= graceSeconds {
+            return true
+        }
+        return false
+    }
+
+    private func updateProbeRTT(_ elapsedMs: Double) {
+        let alpha = 0.2
+        if let current = probeRttEwmaMs {
+            probeRttEwmaMs = current * (1 - alpha) + elapsedMs * alpha
+        } else {
+            probeRttEwmaMs = elapsedMs
+        }
+    }
+
+    // MARK: - Reconnect Backoff
+
+    private func scheduleReconnect(reason: ReconnectReason) {
         guard running else { return }
-        let delay = backoffSeconds
-        Log.sftp.notice("ConnectionHealth: next reconnect in \(delay, privacy: .public)s")
-        notify_post("com.sshmount.reconnect.delay.\(Int(delay))")
+        let jitter = Double.random(in: 0...(backoffSeconds * 0.2))
+        let delay = min(Self.maxBackoff, backoffSeconds + jitter)
+        Log.sftp.notice("ConnectionHealth: next reconnect in \(delay, privacy: .public)s (\(reason.rawValue, privacy: .public))")
+        notify_post("com.sshmount.reconnect.delay.\(Int(backoffSeconds))")
+
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + delay)
         timer.setEventHandler { [weak self] in
-            self?.performReconnect()
+            self?.performReconnect(reason: reason)
         }
         timer.resume()
         reconnectTimer = timer
     }
 
-    private func performReconnect() {
+    private func performReconnect(reason: ReconnectReason) {
         guard running, let reconnect = onReconnectNeeded else { return }
-
-        if reconnect() {
+        if reconnect(reason) {
             state = .connected
             backoffSeconds = 2
+            consecutiveFailures = 0
             startKeepaliveTimer()
         } else {
             backoffSeconds = min(backoffSeconds * 2, Self.maxBackoff)
-            scheduleReconnect()
+            scheduleReconnect(reason: reason)
         }
     }
 
     private func stopReconnectTimer() {
         reconnectTimer?.cancel()
         reconnectTimer = nil
+    }
+
+    // MARK: - Observability
+
+    private func startSnapshotTimer() {
+        stopSnapshotTimer()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 30, repeating: 30)
+        timer.setEventHandler { [weak self] in
+            self?.emitSnapshot()
+        }
+        timer.resume()
+        snapshotTimer = timer
+    }
+
+    private func stopSnapshotTimer() {
+        snapshotTimer?.cancel()
+        snapshotTimer = nil
+    }
+
+    private func emitSnapshot() {
+        let ioAge: String
+        if let lastSuccessfulIOAt {
+            ioAge = String(format: "%.1f", Date().timeIntervalSince(lastSuccessfulIOAt))
+        } else {
+            ioAge = "n/a"
+        }
+        let rtt = self.probeRttEwmaMs.map { String(format: "%.1f", $0) } ?? "n/a"
+        let queueWait = self.queueWaitEwmaMs.map { String(format: "%.1f", $0) } ?? "n/a"
+        let reason = self.lastReconnectReason?.rawValue ?? "none"
+        Log.sftp.notice(
+            "HealthSnapshot state=\(self.state.description, privacy: .public) inflight=\(self.inflightOperations, privacy: .public) ioAge=\(ioAge, privacy: .public)s probeRTT=\(rtt, privacy: .public)ms queueEWMA=\(queueWait, privacy: .public)ms reason=\(reason, privacy: .public)"
+        )
     }
 }

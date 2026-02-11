@@ -70,6 +70,7 @@ This kills both:
 - `fskit_agent` (per-user daemon) - handles user-level operations
 
 `launchd` will automatically respawn both daemons. This is often necessary when testing mount/unmount cycles.
+Before daemon restarts, try force unmount first (`sshmount unmount --force <mountPoint>` or the app's Force unmount action).
 
 ## Usage
 
@@ -78,17 +79,31 @@ This kills both:
 Create a mount from:
 - `Host` (must exist in `~/.ssh/config`)
 - `Remote Path`
-- optional `Mount Options`
+- typed `Connection Options` (profile, workers, health, queue timeout, cache)
 
 The app automatically tries SSH key authentication first. If keys fail, you'll be prompted for a password (used only for that mount attempt, never saved).
+If a mount is stuck, use the row's **Force unmount** action (filled eject icon), which runs `umount -f`.
 
 ### CLI
 
 Commands:
 
 ```bash
-sshmount mount <hostAlias>:<remotePath> <localMountPoint> -o <mountOptions>
+sshmount mount <hostAlias>:<remotePath> <localMountPoint> \
+  --profile <standard|git> \
+  --read-workers <1-8> \
+  --write-workers <1-8> \
+  --io-mode <blocking|nonblocking> \
+  --health-interval <1-300> \
+  --health-timeout <1-120> \
+  --health-failures <1-12> \
+  --busy-threshold <1-4096> \
+  --grace-seconds <0-300> \
+  --queue-timeout-ms <100-60000> \
+  --cache-attr <0-300> \
+  --cache-dir <0-300>
 sshmount unmount <localMountPoint>
+sshmount unmount --force <localMountPoint>
 sshmount list
 sshmount status
 sshmount test <hostAlias>:<remotePath>
@@ -97,58 +112,58 @@ sshmount test <hostAlias>:<remotePath>
 Example:
 
 ```bash
-sshmount mount my-server:~/project ~/Volumes/my-server -o rdonly,nosuid,follow_symlinks=no
+sshmount mount my-server:~/project ~/Volumes/my-server \
+  --profile standard \
+  --read-workers 1 \
+  --write-workers 1 \
+  --io-mode blocking \
+  --health-interval 5 \
+  --health-timeout 10 \
+  --health-failures 5 \
+  --busy-threshold 32 \
+  --grace-seconds 20 \
+  --queue-timeout-ms 2000 \
+  --cache-attr 5 \
+  --cache-dir 5
 ```
 
 Unmount:
 
 ```bash
 sshmount unmount ~/Volumes/my-server
+sshmount unmount --force ~/Volumes/my-server
 ```
 
-## Supported mount options
+## Canonical options
 
-- `ro` / `rdonly`
-- `uid=<n>`
-- `gid=<n>`
-- `umask=<octal>`
-- `noexec`
-- `nosuid`
-- `noatime`
-- `cache_timeout=<seconds>`
-- `dir_cache_timeout=<seconds>`
-- `follow_symlinks=yes|no`
-- `reconnect_max=<n>`
-- `reconnect_timeout=<seconds>`
-- `parallel_sessions=<n>` (1-8, default 1; enables parallel read sessions)
-- `parallel_write_sessions=<n>` (1-8, default 1; enables parallel write sessions, path-sticky to preserve per-file ordering)
-- `nonblocking_io=yes|no` (default yes; enables non-blocking SFTP read/write loops on dedicated I/O sessions)
-- `keepalive_interval=<seconds>` (default 1; health-check probe interval)
-- `keepalive_timeout=<seconds>` (default 3; timeout per health-check probe)
-- `keepalive_failures=<n>` (default 3; reconnect after N consecutive failed probes)
-- `max_pending_ops=<n>` (16-4096, default 256; apply backpressure to avoid unbounded queued FS ops)
+Only canonical typed options are supported:
+- `profile`
+- `read_workers`
+- `write_workers`
+- `io_mode`
+- `health_interval_s`
+- `health_timeout_s`
+- `health_failures`
+- `busy_threshold`
+- `grace_seconds`
+- `queue_timeout_ms`
+- `cache_attr_s`
+- `cache_dir_s`
 
-Notes:
-- `nodev` is explicitly unsupported.
-- SSH connection/auth options should be configured in `~/.ssh/config`.
-- If `parallel_write_sessions` is set, writes are distributed by path (same file stays ordered).
-- The app tries SSH key authentication first; password prompt appears only if key auth fails. Passwords are never saved.
+Legacy comma-separated mount option syntax is intentionally unsupported.
 
 ## Throughput Tuning
 
-Recommended starting point for high-throughput links:
+Recommended starting point for stable links:
 
 ```bash
--o nonblocking_io=yes,parallel_sessions=4,parallel_write_sessions=4,cache_timeout=5,dir_cache_timeout=5
+--profile standard --read-workers 1 --write-workers 1 --io-mode blocking --health-interval 5 --health-timeout 10 --health-failures 5 --busy-threshold 32 --grace-seconds 20 --queue-timeout-ms 2000 --cache-attr 5 --cache-dir 5
 ```
 
-Tune `parallel_sessions` and `parallel_write_sessions` based on workload and server capacity.
-Too many sessions can reduce performance on constrained servers.
-
-For constrained or unstable links, start with lower concurrency and less aggressive health checks:
+For Git-heavy workflows:
 
 ```bash
--o parallel_sessions=1,parallel_write_sessions=1,nonblocking_io=no,keepalive_timeout=8,keepalive_failures=5,max_pending_ops=128,cache_timeout=15,dir_cache_timeout=15
+--profile git
 ```
 
 ## Important note about Git over SSHFS

@@ -41,19 +41,22 @@ struct MountListView: View {
                 })
                 .transition(.opacity)
             } else if let config = passwordPromptConfig {
-                SessionPasswordPromptView(
-                    label: config.label,
-                    onCancel: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            passwordPromptConfig = nil
-                        }
-                    },
-                    onMount: { password in
+                PasswordPromptView(
+                    title: "Authentication Failed",
+                    message: "SSH key authentication failed for **\(config.label)**. Please enter your password:",
+                    actionLabel: "Mount",
+                    onSubmit: { password in
                         withAnimation(.easeInOut(duration: 0.2)) {
                             passwordPromptConfig = nil
                         }
                         Task {
-                            await manager.mount(config, sessionPassword: password)
+                            let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+                            _ = await manager.mountWithResult(config, sessionPassword: trimmed.isEmpty ? nil : trimmed)
+                        }
+                    },
+                    onCancel: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            passwordPromptConfig = nil
                         }
                     }
                 )
@@ -118,6 +121,7 @@ struct MountListView: View {
                         connectedSince: entry.connectedSince,
                         retryAttempt: entry.retryAttempt,
                         retryNextAt: entry.retryNextAt,
+                        reconnectReason: entry.lastReconnectReason,
                         actions: {
                             if entry.status == .connected {
                                 Button {
@@ -147,6 +151,16 @@ struct MountListView: View {
                             }
                             .buttonStyle(.plain)
                             .help("Unmount")
+
+                            Button {
+                                Task { await manager.unmount(entry, force: true) }
+                            } label: {
+                                Image(systemName: "eject.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Force unmount")
                         }
                     )
                     .transition(.move(edge: .top).combined(with: .opacity))
@@ -264,6 +278,7 @@ struct ConnectionRow<Actions: View>: View {
     var connectedSince: Date?
     var retryAttempt: Int = 0
     var retryNextAt: Date?
+    var reconnectReason: String? = nil
     @ViewBuilder let actions: () -> Actions
 
     @State private var pulsing = false
@@ -313,7 +328,9 @@ struct ConnectionRow<Actions: View>: View {
                         if status == .reconnecting, retryAttempt > 0 {
                             retryStatusText
                         } else {
-                            Text(status.text)
+                            Text(status == .reconnecting
+                                 ? "\(status.text)\(reconnectReason.map { " (\($0))" } ?? "")"
+                                 : status.text)
                                 .foregroundStyle(statusColor)
 
                             if let subtitle {
@@ -356,58 +373,21 @@ struct ConnectionRow<Actions: View>: View {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let remaining = max(0, Int(retryNextAt.timeIntervalSince(context.date)))
                 if remaining > 0 {
-                    Text("Retry #\(retryAttempt) in \(remaining)s")
+                    Text("Retry #\(retryAttempt) in \(remaining)s\(reconnectReason.map { " (\($0))" } ?? "")")
                         .foregroundStyle(statusColor)
                         .monospacedDigit()
                 } else {
-                    Text("Retry #\(retryAttempt)...")
+                    Text("Retry #\(retryAttempt)...\(reconnectReason.map { " (\($0))" } ?? "")")
                         .foregroundStyle(statusColor)
                 }
             }
         } else {
-            Text("Reconnecting...")
+            Text("Reconnecting...\(reconnectReason.map { " (\($0))" } ?? "")")
                 .foregroundStyle(statusColor)
         }
     }
 }
 
-struct SessionPasswordPromptView: View {
-    let label: String
-    let onCancel: () -> Void
-    let onMount: (_ password: String?) -> Void
-
-    @State private var password = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Authentication Failed")
-                .font(.headline)
-
-            Text("SSH key authentication failed for **\(label)**. Please enter your password:")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            SecureField("Password", text: $password)
-                .textFieldStyle(.roundedBorder)
-
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    onCancel()
-                }
-                .keyboardShortcut(.cancelAction)
-
-                Button("Mount") {
-                    let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
-                    onMount(trimmed.isEmpty ? nil : trimmed)
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(password.isEmpty)
-            }
-        }
-        .padding()
-    }
-}
 
 // MARK: - Status Section
 
@@ -482,9 +462,5 @@ private func openInFinder(path: String) {
 
 /// Replace the user's home directory prefix with ~
 private func abbreviateHome(_ path: String) -> String {
-    let home = SSHConfigParser.realHomeDirectory
-    if path.hasPrefix(home) {
-        return "~" + path.dropFirst(home.count)
-    }
-    return path
+    PathUtilities.abbreviateHome(path)
 }

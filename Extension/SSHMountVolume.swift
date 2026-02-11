@@ -11,31 +11,53 @@ final class SSHMountVolume: FSVolume,
                             FSVolume.ReadWriteOperations,
                             @unchecked Sendable {
 
+    // MARK: - Constants
+
+    private static let defaultBlockSize = 4096
+    private static let defaultIOSize = 262_144
+    private static func pendingOperationLimit(for profile: MountProfile) -> Int {
+        profile == .git ? 64 : 128
+    }
+
     let sftp: SFTPSession
     let remotePath: String
-    let mountOpts: MountOptions
+    let mountOptions: MountOptions
     let healthMonitor: ConnectionHealthMonitor
 
     /// Serial queue for primary-session SFTP operations (metadata + fallback I/O).
     /// libssh2 is not thread-safe per session.
-    private let sftpQueue = DispatchQueue(label: "com.sshmount.sftp-serial")
+    private let sftpQueue = DispatchQueue(label: "com.sshmount.sftp-serial", qos: .utility)
 
     /// Dispatch work onto the serial SFTP queue without introducing additional Sendable constraints.
-    private func enqueueSFTPOperation(_ work: @escaping () -> Void) {
-        enqueueOperation(on: sftpQueue, work)
+    private func enqueueSFTPOperation(onTimeout: (() -> Void)? = nil, _ work: @escaping () -> Void) {
+        enqueueOperation(on: sftpQueue, onTimeout: onTimeout, work)
     }
 
     /// Global queue backpressure so overload does not create an unbounded async backlog.
     private let pendingOperationSemaphore: DispatchSemaphore
 
-    private func enqueueOperation(on queue: DispatchQueue, _ work: @escaping () -> Void) {
-        pendingOperationSemaphore.wait()
+    private func enqueueOperation(on queue: DispatchQueue, onTimeout: (() -> Void)? = nil, _ work: @escaping () -> Void) {
+        let waitStart = Date()
+        let timeout = DispatchTime.now() + .milliseconds(mountOptions.queueTimeoutMs)
+        guard pendingOperationSemaphore.wait(timeout: timeout) == .success else {
+            healthMonitor.recordQueueWait(milliseconds: Double(mountOptions.queueTimeoutMs), saturated: true)
+            healthMonitor.triggerReconnect(reason: .workerExhausted)
+            onTimeout?()
+            return
+        }
+        let waitedMs = Date().timeIntervalSince(waitStart) * 1000
+        healthMonitor.recordQueueWait(milliseconds: waitedMs, saturated: false)
         let semaphore = pendingOperationSemaphore
         queue.async(execute: DispatchWorkItem(block: {
             defer { semaphore.signal() }
             work()
         }))
     }
+
+    /// Dedicated SSH session and serial queue for keepalive probes.
+    /// Runs independently of all I/O queues so probes are never blocked by load.
+    private let keepaliveSession: SFTPSession
+    private let keepaliveQueue = DispatchQueue(label: "com.sshmount.sftp-keepalive", qos: .userInitiated)
 
     /// Dedicated I/O worker with its own SSH/SFTP session and serial queue.
     private final class IOWorker: @unchecked Sendable {
@@ -44,7 +66,7 @@ final class SSHMountVolume: FSVolume,
 
         init(sftp: SFTPSession, label: String) {
             self.sftp = sftp
-            self.queue = DispatchQueue(label: label)
+            self.queue = DispatchQueue(label: label, qos: .utility)
         }
     }
 
@@ -57,37 +79,17 @@ final class SSHMountVolume: FSVolume,
 
     // MARK: - Item ↔ Path Tracking
 
-    /// Map FSItem (by ObjectIdentifier) → remote path.
-    private var itemToPath: [ObjectIdentifier: String] = [:]
-    /// Map remote path → FSItem (keeps items alive while tracked).
-    private var pathToItem: [String: FSItem] = [:]
-    /// Map remote path → item ID (inode-like).
-    private var pathToID: [String: UInt64] = [:]
-    private var nextItemID: UInt64 = 10
-    private let lock = NSLock()
+    private let itemTracker = ItemTracker()
 
-    // MARK: - Attribute Cache
+    // MARK: - Attribute & Directory Cache
 
-    private struct CachedAttrs {
-        let attrs: SFTPFileAttributes
-        let expiry: Date
-    }
-    private var attrCache: [String: CachedAttrs] = [:]
-
-    // MARK: - Directory Listing Cache
-
-    private struct CachedDirEntries {
-        let entries: [SFTPDirectoryEntry]
-        let expiry: Date
-    }
-    private var dirCache: [String: CachedDirEntries] = [:]
-
-    private let cacheLock = NSLock()
+    private let cache = AttributeCache()
 
     init(
         volumeID: FSVolume.Identifier,
         volumeName: FSFileName,
         sftp: SFTPSession,
+        keepaliveSession: SFTPSession,
         readSessions: [SFTPSession] = [],
         writeSessions: [SFTPSession] = [],
         remotePath: String,
@@ -95,6 +97,7 @@ final class SSHMountVolume: FSVolume,
         healthMonitor: ConnectionHealthMonitor
     ) {
         self.sftp = sftp
+        self.keepaliveSession = keepaliveSession
         self.readWorkers = readSessions.enumerated().map {
             IOWorker(sftp: $0.element, label: "com.sshmount.sftp-read-\($0.offset)")
         }
@@ -102,29 +105,53 @@ final class SSHMountVolume: FSVolume,
             IOWorker(sftp: $0.element, label: "com.sshmount.sftp-write-\($0.offset)")
         }
         self.remotePath = remotePath
-        self.mountOpts = options
-        self.pendingOperationSemaphore = DispatchSemaphore(value: options.maxPendingOperations)
+        self.mountOptions = options
+        self.pendingOperationSemaphore = DispatchSemaphore(
+            value: Self.pendingOperationLimit(for: options.profile)
+        )
         self.healthMonitor = healthMonitor
         super.init(volumeID: volumeID, volumeName: volumeName)
         setupHealthMonitor()
     }
 
     private func setupHealthMonitor() {
-        healthMonitor.onSendKeepalive = { [weak self] in
+        // Keepalive probes run on a dedicated session + queue, never blocked by I/O.
+        healthMonitor.onSendSSHKeepalive = { [weak self] timeoutMs in
             guard let self else { return false }
-            let timeoutMs = Int32((self.mountOpts.keepaliveTimeout * 1000).rounded())
-            return self.sftpQueue.sync { self.sftp.sendKeepalive(timeoutMs: timeoutMs) }
+            return self.keepaliveQueue.sync {
+                self.keepaliveSession.sendSSHKeepalive(timeoutMs: timeoutMs)
+            }
         }
 
-        healthMonitor.onReconnectNeeded = { [weak self] in
+        healthMonitor.onSendSFTPProbe = { [weak self] timeoutMs in
             guard let self else { return false }
+            return self.keepaliveQueue.sync {
+                self.keepaliveSession.probeSFTP(timeoutMs: timeoutMs)
+            }
+        }
+
+        healthMonitor.onReconnectNeeded = { [weak self] reason in
+            guard let self else { return false }
+            // Reconnect the keepalive session first (it's the canary).
+            let keepaliveOk = self.keepaliveQueue.sync {
+                do {
+                    try self.keepaliveSession.reconnect()
+                    return true
+                } catch {
+                    Log.volume.notice("Keepalive session reconnect failed (\(reason.rawValue, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+                    return false
+                }
+            }
+            guard keepaliveOk else { return false }
+
+            // Then reconnect the primary session.
             return self.sftpQueue.sync {
                 do {
                     self.sftp.releaseAllHandles()
                     try self.sftp.reconnect()
                     return true
                 } catch {
-                    Log.volume.notice("Health monitor reconnect failed: \(error.localizedDescription, privacy: .public)")
+                    Log.volume.notice("Primary session reconnect failed (\(reason.rawValue, privacy: .public)): \(error.localizedDescription, privacy: .public)")
                     return false
                 }
             }
@@ -142,55 +169,29 @@ final class SSHMountVolume: FSVolume,
 
     /// Get or create an FSItem for a remote path.
     private func item(forPath path: String) -> (FSItem, UInt64) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if let existing = pathToItem[path], let id = pathToID[path] {
-            return (existing, id)
-        }
-
-        let fsItem = FSItem()
-        let id = nextItemID
-        nextItemID += 1
-
-        itemToPath[ObjectIdentifier(fsItem)] = path
-        pathToItem[path] = fsItem
-        pathToID[path] = id
-        return (fsItem, id)
+        itemTracker.item(forPath: path)
     }
 
     /// Resolve an FSItem back to its remote path.
     private func path(for item: FSItem) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return itemToPath[ObjectIdentifier(item)]
+        itemTracker.path(for: item)
     }
 
     /// Remove tracking for an item (called on reclaim).
     private func untrack(_ item: FSItem) {
-        lock.lock()
-        defer { lock.unlock() }
-        let oid = ObjectIdentifier(item)
-        if let path = itemToPath.removeValue(forKey: oid) {
-            pathToItem.removeValue(forKey: path)
-            pathToID.removeValue(forKey: path)
-        }
+        itemTracker.untrack(item)
     }
 
     /// Build the full child path from a directory item + child name.
     private func childPath(directory: FSItem, name: String) -> String? {
-        guard let dirPath = path(for: directory) else { return nil }
-        if dirPath.hasSuffix("/") {
-            return dirPath + name
-        }
-        return dirPath + "/" + name
+        itemTracker.childPath(directory: directory, name: name)
     }
 
     /// Dispatch reads to worker sessions in round-robin order.
     /// Falls back to the primary session if no worker sessions are configured.
-    private func enqueueReadOperation(_ work: @escaping (_ session: SFTPSession) -> Void) {
+    private func enqueueReadOperation(onTimeout: (() -> Void)? = nil, _ work: @escaping (_ session: SFTPSession) -> Void) {
         guard !readWorkers.isEmpty else {
-            enqueueSFTPOperation { work(self.sftp) }
+            enqueueSFTPOperation(onTimeout: onTimeout) { work(self.sftp) }
             return
         }
 
@@ -200,14 +201,14 @@ final class SSHMountVolume: FSVolume,
         let worker = readWorkers[index]
         readWorkerLock.unlock()
 
-        enqueueOperation(on: worker.queue, {
+        enqueueOperation(on: worker.queue, onTimeout: onTimeout, {
             work(worker.sftp)
         })
     }
 
-    private func enqueueWriteOperation(path: String, _ work: @escaping (_ session: SFTPSession) -> Void) {
+    private func enqueueWriteOperation(path: String, onTimeout: (() -> Void)? = nil, _ work: @escaping (_ session: SFTPSession) -> Void) {
         guard !writeWorkers.isEmpty else {
-            enqueueSFTPOperation { work(self.sftp) }
+            enqueueSFTPOperation(onTimeout: onTimeout) { work(self.sftp) }
             return
         }
 
@@ -223,40 +224,55 @@ final class SSHMountVolume: FSVolume,
             worker = writeWorkers[Int(hash % UInt64(writeWorkers.count))]
         }
 
-        enqueueOperation(on: worker.queue, {
+        enqueueOperation(on: worker.queue, onTimeout: onTimeout, {
             work(worker.sftp)
         })
     }
 
+    private func withHealthTracked<T>(_ op: () throws -> T) throws -> T {
+        healthMonitor.recordOperationStart()
+        var success = false
+        defer { healthMonitor.recordOperationResult(success: success) }
+        let value = try op()
+        success = true
+        return value
+    }
+
     private func withIOSessionReconnect<T>(_ session: SFTPSession, op: () throws -> T) throws -> T {
-        do {
-            return try op()
-        } catch {
-            guard SFTPSession.isConnectionError(error) else { throw error }
-            session.releaseAllHandles()
-            try session.reconnect()
-            return try op()
+        try withHealthTracked {
+            do {
+                return try op()
+            } catch {
+                guard SFTPSession.isConnectionError(error) else { throw error }
+                session.releaseAllHandles()
+                try session.reconnect()
+                return try op()
+            }
         }
     }
 
-    private func reconnectIOSessions() {
-        for worker in readWorkers {
-            worker.queue.async {
-                worker.sftp.releaseAllHandles()
-                do {
-                    try worker.sftp.reconnect()
-                } catch {
-                    Log.volume.notice("Read worker reconnect failed: \(error.localizedDescription, privacy: .public)")
-                }
-            }
+    /// Dispatch to the appropriate reconnect strategy based on which session is being used.
+    private func withSessionReconnect<T>(_ session: SFTPSession, op: () throws -> T) throws -> T {
+        if session === self.sftp {
+            return try withReconnect(op)
+        } else {
+            return try withIOSessionReconnect(session, op: op)
         }
-        for worker in writeWorkers {
+    }
+
+    private var allWorkers: [IOWorker] { readWorkers + writeWorkers }
+    private var reconnectWaitTimeout: TimeInterval {
+        max(15, mountOptions.healthTimeout * Double(mountOptions.healthFailures + 1))
+    }
+
+    private func reconnectIOSessions() {
+        for worker in allWorkers {
             worker.queue.async {
                 worker.sftp.releaseAllHandles()
                 do {
                     try worker.sftp.reconnect()
                 } catch {
-                    Log.volume.notice("Write worker reconnect failed: \(error.localizedDescription, privacy: .public)")
+                    Log.volume.notice("Worker reconnect failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
         }
@@ -264,14 +280,27 @@ final class SSHMountVolume: FSVolume,
 
     private func releaseHandleAcrossSessions(path: String) {
         sftp.releaseHandle(path: path)
-        for worker in readWorkers {
+        for worker in allWorkers {
             worker.queue.sync {
                 worker.sftp.releaseHandle(path: path)
             }
         }
-        for worker in writeWorkers {
-            worker.queue.sync {
-                worker.sftp.releaseHandle(path: path)
+    }
+
+    private func syncPathAcrossSessions(path: String) throws {
+        try sftp.syncHandle(path: path)
+        for worker in allWorkers {
+            try worker.queue.sync {
+                try worker.sftp.syncHandle(path: path)
+            }
+        }
+    }
+
+    private func syncAllWriteHandlesAcrossSessions() throws {
+        try sftp.syncAllWriteHandles()
+        for worker in allWorkers {
+            try worker.queue.sync {
+                try worker.sftp.syncAllWriteHandles()
             }
         }
     }
@@ -285,15 +314,13 @@ final class SSHMountVolume: FSVolume,
         isShutdown = true
         shutdownLock.unlock()
 
-        for worker in readWorkers {
+        for worker in allWorkers {
             worker.queue.sync {
                 worker.sftp.disconnect()
             }
         }
-        for worker in writeWorkers {
-            worker.queue.sync {
-                worker.sftp.disconnect()
-            }
+        keepaliveQueue.sync {
+            keepaliveSession.disconnect()
         }
         sftp.disconnect()
     }
@@ -306,10 +333,7 @@ final class SSHMountVolume: FSVolume,
 
     /// Flush all attribute and directory caches (called after reconnection).
     private func invalidateAllCaches() {
-        cacheLock.lock()
-        attrCache.removeAll()
-        dirCache.removeAll()
-        cacheLock.unlock()
+        cache.invalidateAll()
         Log.volume.debug("All caches invalidated after reconnection")
     }
 
@@ -319,43 +343,49 @@ final class SSHMountVolume: FSVolume,
     /// waits up to `reconnect_timeout` seconds for recovery before failing.
     /// On connection error during the operation, triggers reconnection and retries once.
     private func withReconnect<T>(_ op: () throws -> T) throws -> T {
-        // If we know the connection is down, wait for reconnection first
-        if healthMonitor.state != .connected {
-            Log.volume.debug("withReconnect: connection not ready (state=\(self.healthMonitor.state.description, privacy: .public)), waiting")
-            let recovered = healthMonitor.waitForConnected(timeout: mountOpts.reconnectTimeout)
-            if !recovered {
-                Log.volume.error("withReconnect: timed out waiting for reconnection")
-                throw POSIXError(.ETIMEDOUT)
+        try withHealthTracked {
+            // If we know the connection is down, wait for reconnection first
+            if healthMonitor.state == .reconnecting {
+                Log.volume.debug("withReconnect: connection not ready (state=\(self.healthMonitor.state.description, privacy: .public)), waiting")
+                let recovered = healthMonitor.waitForConnected(timeout: reconnectWaitTimeout)
+                if !recovered {
+                    Log.volume.error("withReconnect: timed out waiting for reconnection")
+                    throw POSIXError(.ETIMEDOUT)
+                }
             }
-        }
 
-        do {
-            return try op()
-        } catch {
-            guard SFTPSession.isConnectionError(error) else { throw error }
-            Log.volume.notice("Connection error detected, triggering reconnect")
-            healthMonitor.triggerReconnect()
-            let recovered = healthMonitor.waitForConnected(timeout: mountOpts.reconnectTimeout)
-            guard recovered else {
-                Log.volume.error("withReconnect: reconnect failed")
-                throw POSIXError(.ETIMEDOUT)
+            do {
+                return try op()
+            } catch {
+                guard SFTPSession.isConnectionError(error) else { throw error }
+                Log.volume.notice("Connection error detected, triggering reconnect")
+                healthMonitor.triggerReconnect(reason: .transportError)
+                let recovered = healthMonitor.waitForConnected(timeout: reconnectWaitTimeout)
+                guard recovered else {
+                    Log.volume.error("withReconnect: reconnect failed")
+                    throw POSIXError(.ETIMEDOUT)
+                }
+                return try op()
             }
-            return try op()
         }
+    }
+
+    // MARK: - Error Mapping
+
+    /// Map an SFTP error to the most appropriate POSIX error code.
+    private static func posixCode(from error: Error, fallback: POSIXErrorCode = .EIO) -> POSIXErrorCode {
+        if let mountError = error as? MountError {
+            return mountError.posixErrorCode
+        }
+        if let posixError = error as? POSIXError {
+            return posixError.code
+        }
+        return fallback
     }
 
     // MARK: - Attributes Helpers
 
-    /// Apply permission overrides from mount options.
-    private func applyPermissionOverrides(_ mode: UInt32, isDirectory: Bool) -> UInt32 {
-        var m = mode
-        if let umask = mountOpts.umask { m &= ~umask }
-        if mountOpts.noExec && !isDirectory { m &= ~0o111 }
-        if mountOpts.nosuid { m &= ~0o6000 }
-        return m
-    }
-
-    /// Convert SFTPFileAttributes → FSItem.Attributes, applying mount option overrides.
+    /// Convert SFTPFileAttributes → FSItem.Attributes.
     private func fsAttributes(from sftpAttrs: SFTPFileAttributes, itemID: UInt64, parentID: UInt64) -> FSItem.Attributes {
         let attrs = FSItem.Attributes()
         if sftpAttrs.isSymlink {
@@ -366,11 +396,9 @@ final class SSHMountVolume: FSVolume,
             attrs.type = .file
         }
 
-        attrs.mode = applyPermissionOverrides(sftpAttrs.permissions, isDirectory: sftpAttrs.isDirectory)
-
-        // Override uid/gid if requested
-        attrs.uid = mountOpts.overrideUID ?? sftpAttrs.uid
-        attrs.gid = mountOpts.overrideGID ?? sftpAttrs.gid
+        attrs.mode = sftpAttrs.permissions
+        attrs.uid = sftpAttrs.uid
+        attrs.gid = sftpAttrs.gid
 
         attrs.size = sftpAttrs.size
         attrs.allocSize = sftpAttrs.size
@@ -378,11 +406,7 @@ final class SSHMountVolume: FSVolume,
         attrs.parentID = FSItem.Identifier(rawValue: parentID)!
         attrs.linkCount = sftpAttrs.isDirectory ? 2 : 1
         attrs.modifyTime = timespec(tv_sec: Int(sftpAttrs.modifiedAt.timeIntervalSince1970), tv_nsec: 0)
-        if mountOpts.noatime {
-            attrs.accessTime = attrs.modifyTime
-        } else {
-            attrs.accessTime = timespec(tv_sec: Int(sftpAttrs.accessedAt.timeIntervalSince1970), tv_nsec: 0)
-        }
+        attrs.accessTime = attrs.modifyTime
         attrs.changeTime = attrs.modifyTime
         attrs.birthTime = attrs.modifyTime
         return attrs
@@ -390,37 +414,24 @@ final class SSHMountVolume: FSVolume,
 
     /// Get item ID for a path (creates one if needed).
     private func itemID(forPath path: String) -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        if let id = pathToID[path] { return id }
-        let id = nextItemID
-        nextItemID += 1
-        pathToID[path] = id
-        return id
+        itemTracker.itemID(forPath: path)
     }
 
     // MARK: - Cached SFTP Stat
 
     /// Stat with optional caching based on cache_timeout option.
     private func cachedStat(path: String) throws -> SFTPFileAttributes {
-        let timeout = mountOpts.cacheTimeout
-        if timeout > 0 {
-            cacheLock.lock()
-            if let cached = attrCache[path], cached.expiry > Date() {
-                cacheLock.unlock()
-                return cached.attrs
-            }
-            cacheLock.unlock()
+        let timeout = mountOptions.cacheTimeout
+        if timeout > 0, let cached = cache.cachedAttrs(forPath: path) {
+            return cached
         }
 
         let attrs = try withReconnect {
-            try sftp.stat(path: path, followSymlinks: mountOpts.followSymlinks)
+            try sftp.stat(path: path)
         }
 
         if timeout > 0 {
-            cacheLock.lock()
-            attrCache[path] = CachedAttrs(attrs: attrs, expiry: Date().addingTimeInterval(timeout))
-            cacheLock.unlock()
+            cache.setAttrs(attrs, forPath: path, timeout: timeout)
         }
 
         return attrs
@@ -428,37 +439,21 @@ final class SSHMountVolume: FSVolume,
 
     /// Invalidate cache entry for a path (called after writes/creates/deletes).
     private func invalidateCache(_ path: String, includeParent: Bool = true) {
-        guard mountOpts.cacheTimeout > 0 || mountOpts.dirCacheTimeout > 0 else { return }
-        cacheLock.lock()
-        attrCache.removeValue(forKey: path)
-        dirCache.removeValue(forKey: path)
-        if includeParent {
-            // Structural changes also invalidate parent directory metadata.
-            let parent = (path as NSString).deletingLastPathComponent
-            attrCache.removeValue(forKey: parent)
-            dirCache.removeValue(forKey: parent)
-        }
-        cacheLock.unlock()
+        guard mountOptions.cacheTimeout > 0 || mountOptions.dirCacheTimeout > 0 else { return }
+        cache.invalidate(path, includeParent: includeParent)
     }
 
     /// Read directory with optional caching based on dir_cache_timeout.
     private func cachedReadDir(path: String) throws -> [SFTPDirectoryEntry] {
-        let timeout = mountOpts.dirCacheTimeout
-        if timeout > 0 {
-            cacheLock.lock()
-            if let cached = dirCache[path], cached.expiry > Date() {
-                cacheLock.unlock()
-                return cached.entries
-            }
-            cacheLock.unlock()
+        let timeout = mountOptions.dirCacheTimeout
+        if timeout > 0, let cached = cache.cachedDirEntries(forPath: path) {
+            return cached
         }
 
         let entries = try withReconnect { try sftp.readDirectory(path: path) }
 
         if timeout > 0 {
-            cacheLock.lock()
-            dirCache[path] = CachedDirEntries(entries: entries, expiry: Date().addingTimeInterval(timeout))
-            cacheLock.unlock()
+            cache.setDirEntries(entries, forPath: path, timeout: timeout)
         }
 
         return entries
@@ -482,8 +477,17 @@ final class SSHMountVolume: FSVolume,
         flags: FSSyncFlags,
         replyHandler reply: @escaping (Error?) -> Void
     ) {
-        // SFTP writes are synchronous — nothing to flush
-        reply(nil)
+        enqueueSFTPOperation(onTimeout: {
+            reply(POSIXError(.EAGAIN))
+        }) {
+            do {
+                try self.syncAllWriteHandlesAcrossSessions()
+                reply(nil)
+            } catch {
+                Log.volume.notice("synchronize failed: \(error.localizedDescription, privacy: .public)")
+                reply(POSIXError(Self.posixCode(from: error)))
+            }
+        }
     }
 
     // MARK: - Activate / Deactivate
@@ -521,13 +525,16 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(nil, nil, POSIXError(.EAGAIN))
+        }) {
             do {
                 let _ = try self.cachedStat(path: fullPath)
                 let (childItem, _) = self.item(forPath: fullPath)
                 reply(childItem, name, nil)
             } catch {
-                reply(nil, nil, POSIXError(.ENOENT))
+                Log.volume.notice("lookupItem failed for \(fullPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(nil, nil, POSIXError(Self.posixCode(from: error, fallback: .ENOENT)))
             }
         }
     }
@@ -553,7 +560,9 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(nil, POSIXError(.EAGAIN))
+        }) {
             do {
                 let sftpAttrs = try self.cachedStat(path: itemPath)
                 let id = self.itemID(forPath: itemPath)
@@ -562,7 +571,8 @@ final class SSHMountVolume: FSVolume,
                 let attrs = self.fsAttributes(from: sftpAttrs, itemID: id, parentID: parentID)
                 reply(attrs, nil)
             } catch {
-                reply(nil, POSIXError(.EIO))
+                Log.volume.notice("getAttributes failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(nil, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -572,13 +582,14 @@ final class SSHMountVolume: FSVolume,
         on item: FSItem,
         replyHandler reply: @escaping (FSItem.Attributes?, Error?) -> Void
     ) {
-        if mountOpts.readOnly { reply(nil, POSIXError(.EROFS)); return }
         guard let itemPath = path(for: item) else {
             reply(nil, POSIXError(.ENOENT))
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(nil, POSIXError(.EAGAIN))
+        }) {
             do {
                 var attrs = LIBSSH2_SFTP_ATTRIBUTES()
                 attrs.flags = 0
@@ -598,12 +609,7 @@ final class SSHMountVolume: FSVolume,
                 }
                 if newAttributes.isValid(.modifyTime) || newAttributes.isValid(.accessTime) {
                     attrs.mtime = UInt(newAttributes.modifyTime.tv_sec)
-                    // Skip atime updates if noatime is set
-                    if self.mountOpts.noatime {
-                        attrs.atime = attrs.mtime
-                    } else {
-                        attrs.atime = UInt(newAttributes.accessTime.tv_sec)
-                    }
+                    attrs.atime = attrs.mtime
                     attrs.flags |= UInt(LIBSSH2_SFTP_ATTR_ACMODTIME)
                 }
 
@@ -611,14 +617,15 @@ final class SSHMountVolume: FSVolume,
                 self.invalidateCache(itemPath, includeParent: false)
 
                 let updated = try self.withReconnect {
-                    try self.sftp.stat(path: itemPath, followSymlinks: self.mountOpts.followSymlinks)
+                    try self.sftp.stat(path: itemPath)
                 }
                 let id = self.itemID(forPath: itemPath)
                 let parentPath = (itemPath as NSString).deletingLastPathComponent
                 let parentID = self.itemID(forPath: parentPath)
                 reply(self.fsAttributes(from: updated, itemID: id, parentID: parentID), nil)
             } catch {
-                reply(nil, POSIXError(.EIO))
+                Log.volume.notice("setAttributes failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(nil, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -638,7 +645,9 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(verifier, POSIXError(.EAGAIN))
+        }) {
             do {
                 let entries = try self.cachedReadDir(path: dirPath)
                 let dirID = self.itemID(forPath: dirPath)
@@ -671,13 +680,11 @@ final class SSHMountVolume: FSVolume,
                         entryAttrs!.fileID = FSItem.Identifier(rawValue: childID)!
                         entryAttrs!.parentID = FSItem.Identifier(rawValue: dirID)!
                         entryAttrs!.size = entry.size
-                        entryAttrs!.mode = self.applyPermissionOverrides(entry.permissions, isDirectory: entry.isDirectory)
+                        entryAttrs!.mode = entry.permissions
                         entryAttrs!.linkCount = entry.isDirectory ? 2 : 1
                         let mtime = timespec(tv_sec: Int(entry.modifiedAt.timeIntervalSince1970), tv_nsec: 0)
                         entryAttrs!.modifyTime = mtime
-                        if self.mountOpts.noatime {
-                            entryAttrs!.accessTime = mtime
-                        }
+                        entryAttrs!.accessTime = mtime
                     }
 
                     let packed = packer.packEntry(
@@ -698,7 +705,8 @@ final class SSHMountVolume: FSVolume,
 
                 reply(verifier, nil)
             } catch {
-                reply(verifier, POSIXError(.EIO))
+                Log.volume.notice("enumerateDirectory failed for \(dirPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(verifier, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -712,7 +720,6 @@ final class SSHMountVolume: FSVolume,
         attributes: FSItem.SetAttributesRequest,
         replyHandler reply: @escaping (FSItem?, FSFileName?, Error?) -> Void
     ) {
-        if mountOpts.readOnly { reply(nil, nil, POSIXError(.EROFS)); return }
         guard let childName = name.string,
               let fullPath = childPath(directory: directory, name: childName) else {
             reply(nil, nil, POSIXError(.EINVAL))
@@ -721,7 +728,9 @@ final class SSHMountVolume: FSVolume,
 
         let mode = attributes.isValid(.mode) ? Int(attributes.mode) : 0o644
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(nil, nil, POSIXError(.EAGAIN))
+        }) {
             do {
                 try self.withReconnect {
                     switch type {
@@ -736,8 +745,8 @@ final class SSHMountVolume: FSVolume,
                 let (newItem, _) = self.item(forPath: fullPath)
                 reply(newItem, name, nil)
             } catch {
-                Log.volume.error("createItem failed: \(error)")
-                reply(nil, nil, POSIXError(.EIO))
+                Log.volume.error("createItem failed for \(fullPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(nil, nil, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -748,18 +757,19 @@ final class SSHMountVolume: FSVolume,
         fromDirectory directory: FSItem,
         replyHandler reply: @escaping (Error?) -> Void
     ) {
-        if mountOpts.readOnly { reply(POSIXError(.EROFS)); return }
         guard let childName = name.string,
               let fullPath = childPath(directory: directory, name: childName) else {
             reply(POSIXError(.ENOENT))
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(POSIXError(.EAGAIN))
+        }) {
             do {
                 self.releaseHandleAcrossSessions(path: fullPath)
                 try self.withReconnect {
-                    let attrs = try self.sftp.stat(path: fullPath, followSymlinks: self.mountOpts.followSymlinks)
+                    let attrs = try self.sftp.stat(path: fullPath)
                     if attrs.isDirectory {
                         try self.sftp.rmdir(path: fullPath)
                     } else {
@@ -770,7 +780,8 @@ final class SSHMountVolume: FSVolume,
                 self.untrack(item)
                 reply(nil)
             } catch {
-                reply(POSIXError(.EIO))
+                Log.volume.notice("removeItem failed for \(fullPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -784,7 +795,6 @@ final class SSHMountVolume: FSVolume,
         overItem: FSItem?,
         replyHandler reply: @escaping (FSFileName?, Error?) -> Void
     ) {
-        if mountOpts.readOnly { reply(nil, POSIXError(.EROFS)); return }
         guard let srcName = sourceName.string,
               let dstName = destinationName.string,
               let srcPath = childPath(directory: sourceDirectory, name: srcName),
@@ -793,7 +803,9 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(nil, POSIXError(.EAGAIN))
+        }) {
             do {
                 self.releaseHandleAcrossSessions(path: srcPath)
                 self.releaseHandleAcrossSessions(path: dstPath)
@@ -805,7 +817,8 @@ final class SSHMountVolume: FSVolume,
                 if let over = overItem { self.untrack(over) }
                 reply(destinationName, nil)
             } catch {
-                reply(nil, POSIXError(.EIO))
+                Log.volume.notice("renameItem failed \(srcPath, privacy: .public) → \(dstPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(nil, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -821,12 +834,15 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(nil, POSIXError(.EAGAIN))
+        }) {
             do {
                 let target = try self.withReconnect { try self.sftp.readlink(path: itemPath) }
                 reply(FSFileName(string: target), nil)
             } catch {
-                reply(nil, POSIXError(.EIO))
+                Log.volume.notice("readSymbolicLink failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(nil, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -838,7 +854,6 @@ final class SSHMountVolume: FSVolume,
         linkContents contents: FSFileName,
         replyHandler reply: @escaping (FSItem?, FSFileName?, Error?) -> Void
     ) {
-        if mountOpts.readOnly { reply(nil, nil, POSIXError(.EROFS)); return }
         guard let childName = name.string,
               let linkPath = childPath(directory: directory, name: childName),
               let target = contents.string else {
@@ -846,15 +861,17 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueSFTPOperation {
+        enqueueSFTPOperation(onTimeout: {
+            reply(nil, nil, POSIXError(.EAGAIN))
+        }) {
             do {
                 try self.withReconnect { try self.sftp.symlink(target: target, linkPath: linkPath) }
                 self.invalidateCache(linkPath)
                 let (newItem, _) = self.item(forPath: linkPath)
                 reply(newItem, name, nil)
             } catch {
-                Log.volume.error("createSymbolicLink failed: \(error)")
-                reply(nil, nil, POSIXError(.EIO))
+                Log.volume.error("createSymbolicLink failed for \(linkPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(nil, nil, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -889,9 +906,19 @@ final class SSHMountVolume: FSVolume,
             reply(nil)
             return
         }
-        enqueueSFTPOperation {
-            self.releaseHandleAcrossSessions(path: itemPath)
-            reply(nil)
+        enqueueSFTPOperation(onTimeout: {
+            reply(POSIXError(.EAGAIN))
+        }) {
+            do {
+                if self.mountOptions.profile == .git {
+                    try self.syncPathAcrossSessions(path: itemPath)
+                }
+                self.releaseHandleAcrossSessions(path: itemPath)
+                reply(nil)
+            } catch {
+                Log.volume.notice("closeItem failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(POSIXError(Self.posixCode(from: error)))
+            }
         }
     }
 
@@ -909,29 +936,26 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueReadOperation { session in
+        enqueueReadOperation(onTimeout: {
+            reply(0, POSIXError(.EAGAIN))
+        }) { session in
             do {
                 if offset < 0 {
                     reply(0, POSIXError(.EINVAL))
                     return
                 }
                 let bytesRead = try buffer.withUnsafeMutableBytes { dst in
-                    let readLength = min(length, dst.count)
+                    let readLength = min(length, dst.count, Self.defaultIOSize)
                     guard readLength > 0 else { return 0 }
                     let readOffset = UInt64(offset)
-                    if session === self.sftp {
-                        return try self.withReconnect {
-                            try session.readFile(path: itemPath, offset: readOffset, length: readLength, into: dst)
-                        }
-                    } else {
-                        return try self.withIOSessionReconnect(session) {
-                            try session.readFile(path: itemPath, offset: readOffset, length: readLength, into: dst)
-                        }
+                    return try self.withSessionReconnect(session) {
+                        try session.readFile(path: itemPath, offset: readOffset, length: readLength, into: dst)
                     }
                 }
                 reply(bytesRead, nil)
             } catch {
-                reply(0, POSIXError(.EIO))
+                Log.volume.notice("read failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(0, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -942,7 +966,6 @@ final class SSHMountVolume: FSVolume,
         at offset: Int64,
         replyHandler reply: @escaping (Int, Error?) -> Void
     ) {
-        if mountOpts.readOnly { reply(0, POSIXError(.EROFS)); return }
         guard let itemPath = path(for: item) else {
             reply(0, POSIXError(.ENOENT))
             return
@@ -952,24 +975,20 @@ final class SSHMountVolume: FSVolume,
             return
         }
 
-        enqueueWriteOperation(path: itemPath) { session in
+        enqueueWriteOperation(path: itemPath, onTimeout: {
+            reply(0, POSIXError(.EAGAIN))
+        }) { session in
             do {
                 let writeOffset = UInt64(offset)
-                let written: Int
-                if session === self.sftp {
-                    written = try self.withReconnect {
-                        try session.writeFile(path: itemPath, offset: writeOffset, data: contents)
-                    }
-                } else {
-                    written = try self.withIOSessionReconnect(session) {
-                        try session.writeFile(path: itemPath, offset: writeOffset, data: contents)
-                    }
+                let chunk = contents.count > Self.defaultIOSize ? Data(contents.prefix(Self.defaultIOSize)) : contents
+                let written = try self.withSessionReconnect(session) {
+                    try session.writeFile(path: itemPath, offset: writeOffset, data: chunk)
                 }
                 self.invalidateCache(itemPath, includeParent: false)
                 reply(written, nil)
             } catch {
-                Log.volume.error("write failed: \(error)")
-                reply(0, POSIXError(.EIO))
+                Log.volume.error("write failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                reply(0, POSIXError(Self.posixCode(from: error)))
             }
         }
     }
@@ -987,8 +1006,8 @@ final class SSHMountVolume: FSVolume,
 
     var volumeStatistics: FSStatFSResult {
         let stats = FSStatFSResult(fileSystemTypeName: "sshfs")
-        stats.blockSize = 4096
-        stats.ioSize = 262144
+        stats.blockSize = Self.defaultBlockSize
+        stats.ioSize = Self.defaultIOSize
         stats.totalBlocks = 1_000_000
         stats.freeBlocks = 500_000
         stats.availableBlocks = 500_000

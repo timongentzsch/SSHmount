@@ -30,10 +30,6 @@ static inline int ssh2_session_block_directions(LIBSSH2_SESSION *session) {
 
 // -- Session options --
 
-static inline int ssh2_session_flag(LIBSSH2_SESSION *session, int flag, int value) {
-    return libssh2_session_flag(session, flag, value);
-}
-
 static inline void ssh2_session_set_timeout(LIBSSH2_SESSION *session, long timeout) {
     libssh2_session_set_timeout(session, timeout);
 }
@@ -45,7 +41,7 @@ static inline void ssh2_keepalive_config(LIBSSH2_SESSION *session,
 }
 
 static inline int ssh2_keepalive_send(LIBSSH2_SESSION *session,
-                                       int *seconds_to_next) {
+                                      int *seconds_to_next) {
     return libssh2_keepalive_send(session, seconds_to_next);
 }
 
@@ -54,23 +50,6 @@ static inline int ssh2_keepalive_send(LIBSSH2_SESSION *session,
 static const int SSH2_ERROR_EAGAIN = LIBSSH2_ERROR_EAGAIN;
 static const int SSH2_SESSION_BLOCK_INBOUND = LIBSSH2_SESSION_BLOCK_INBOUND;
 static const int SSH2_SESSION_BLOCK_OUTBOUND = LIBSSH2_SESSION_BLOCK_OUTBOUND;
-
-// -- Method preference constants (macros not visible to Swift) --
-
-static const int SSH2_METHOD_KEX       = 0;
-static const int SSH2_METHOD_HOSTKEY   = 1;
-static const int SSH2_METHOD_CRYPT_CS  = 2;
-static const int SSH2_METHOD_CRYPT_SC  = 3;
-static const int SSH2_METHOD_MAC_CS    = 4;
-static const int SSH2_METHOD_MAC_SC    = 5;
-static const int SSH2_METHOD_COMP_CS   = 6;
-static const int SSH2_METHOD_COMP_SC   = 7;
-
-static inline int ssh2_session_method_pref(LIBSSH2_SESSION *session,
-                                            int method_type,
-                                            const char *prefs) {
-    return libssh2_session_method_pref(session, method_type, prefs);
-}
 
 // -- Auth --
 
@@ -113,70 +92,18 @@ static inline int ssh2_sftp_closedir(LIBSSH2_SFTP_HANDLE *handle) {
     return libssh2_sftp_closedir(handle);
 }
 
-// -- SFTP readdir --
+// -- SFTP helpers --
 
-static inline int ssh2_sftp_readdir(LIBSSH2_SFTP_HANDLE *handle,
-                                     char *buffer,
-                                     size_t buffer_maxlen,
-                                     LIBSSH2_SFTP_ATTRIBUTES *attrs) {
-    return libssh2_sftp_readdir(handle, buffer, buffer_maxlen, attrs);
+static inline int ssh2_sftp_fsync(LIBSSH2_SFTP_HANDLE *handle) {
+    return libssh2_sftp_fsync(handle);
 }
 
-// -- SFTP stat --
-
-static inline int ssh2_sftp_stat(LIBSSH2_SFTP *sftp,
-                                  const char *path,
-                                  LIBSSH2_SFTP_ATTRIBUTES *attrs) {
-    return libssh2_sftp_stat(sftp, path, attrs);
-}
-
-static inline int ssh2_sftp_lstat(LIBSSH2_SFTP *sftp,
-                                   const char *path,
-                                   LIBSSH2_SFTP_ATTRIBUTES *attrs) {
-    return libssh2_sftp_lstat(sftp, path, attrs);
-}
-
-static inline int ssh2_sftp_setstat(LIBSSH2_SFTP *sftp,
-                                     const char *path,
-                                     LIBSSH2_SFTP_ATTRIBUTES *attrs) {
-    return libssh2_sftp_setstat(sftp, path, attrs);
-}
-
-// -- SFTP file ops --
-
-static inline LIBSSH2_SFTP_HANDLE *ssh2_sftp_open(LIBSSH2_SFTP *sftp,
-                                                    const char *filename,
-                                                    unsigned long flags,
-                                                    long mode) {
-    return libssh2_sftp_open(sftp, filename, flags, mode);
-}
-
-static inline int ssh2_sftp_mkdir(LIBSSH2_SFTP *sftp,
-                                   const char *path,
-                                   long mode) {
-    return libssh2_sftp_mkdir(sftp, path, mode);
-}
-
-static inline int ssh2_sftp_rmdir(LIBSSH2_SFTP *sftp, const char *path) {
-    return libssh2_sftp_rmdir(sftp, path);
-}
-
-static inline int ssh2_sftp_unlink(LIBSSH2_SFTP *sftp,
-                                    const char *filename) {
-    return libssh2_sftp_unlink(sftp, filename);
-}
-
-static inline int ssh2_sftp_rename(LIBSSH2_SFTP *sftp,
-                                    const char *sourcefile,
-                                    const char *destfile) {
-    return libssh2_sftp_rename(sftp, sourcefile, destfile);
-}
-
-static inline int ssh2_sftp_readlink(LIBSSH2_SFTP *sftp,
-                                      const char *path,
-                                      char *target,
-                                      unsigned int maxlen) {
-    return libssh2_sftp_readlink(sftp, path, target, maxlen);
+static inline int ssh2_sftp_posix_rename_ex(LIBSSH2_SFTP *sftp,
+                                            const char *oldpath,
+                                            unsigned int oldpath_len,
+                                            const char *newpath,
+                                            unsigned int newpath_len) {
+    return libssh2_sftp_posix_rename_ex(sftp, oldpath, oldpath_len, newpath, newpath_len);
 }
 
 #endif

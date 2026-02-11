@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 
 /// Parses ~/.ssh/config and resolves concrete host aliases.
 struct SSHConfigParser {
@@ -34,12 +33,7 @@ struct SSHConfigParser {
     private var concreteAliases: Set<String> = []
 
     /// Get the real user home directory (bypasses sandbox container redirection).
-    static var realHomeDirectory: String {
-        if let pw = getpwuid(getuid()) {
-            return String(cString: pw.pointee.pw_dir)
-        }
-        return NSHomeDirectory()
-    }
+    static var realHomeDirectory: String { PathUtilities.realHomeDirectory }
 
     init() {
         let root = URL(fileURLWithPath: Self.realHomeDirectory)
@@ -71,6 +65,13 @@ struct SSHConfigParser {
     /// List all concrete Host entries from ~/.ssh/config.
     func knownHosts() -> [String] {
         concreteAliases.sorted()
+    }
+
+    /// Validate that a host alias is defined in ~/.ssh/config.
+    func validateAlias(_ alias: String) throws {
+        guard concreteAliases.contains(alias) else {
+            throw Error.unknownHostAlias(alias)
+        }
     }
 
     // MARK: - File Parser
@@ -368,13 +369,7 @@ struct SSHConfigParser {
     }
 
     private func expandHome(in path: String) -> String {
-        guard path.hasPrefix("~") else { return path }
-        let home = Self.realHomeDirectory
-        if path == "~" { return home }
-        if path.hasPrefix("~/") {
-            return home + String(path.dropFirst(1))
-        }
-        return path
+        PathUtilities.expandTilde(path)
     }
 
     // MARK: - Pattern Matching

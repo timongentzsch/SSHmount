@@ -47,7 +47,6 @@ struct SFTPFileAttributes: Sendable {
     let permissions: UInt32
     let uid: UInt32
     let gid: UInt32
-    let accessedAt: Date
     let modifiedAt: Date
     let isDirectory: Bool
     let isSymlink: Bool
@@ -58,6 +57,11 @@ struct SFTPFileAttributes: Sendable {
 /// Wraps an SSH connection + SFTP subsystem using libssh2.
 /// Each mount gets one SFTPSession instance.
 final class SFTPSession: @unchecked Sendable {
+
+    /// SSH operation timeout in milliseconds.
+    private static let sshTimeoutMs: Int = 10_000
+    /// Buffer size for directory reading.
+    private static let dirReadBufSize = 512
 
     enum IOMode: Sendable {
         case blocking
@@ -82,13 +86,14 @@ final class SFTPSession: @unchecked Sendable {
     private struct CachedHandle {
         let handle: OpaquePointer          // LIBSSH2_SFTP_HANDLE*
         let forWriting: Bool
+        var dirty: Bool
         var lastUsed: Date
     }
 
     /// LRU cache of open SFTP file handles, keyed by remote path.
     private var handleCache: [String: CachedHandle] = [:]
     /// Maximum number of handles to keep open.
-    private let maxCachedHandles = 16
+    private static let maxCachedHandles = 16
     private var isNonBlockingIO: Bool { ioMode == .nonBlocking }
 
     private func shouldRetryEAGAIN() -> Bool {
@@ -121,24 +126,25 @@ final class SFTPSession: @unchecked Sendable {
         }
     }
 
-    private func closeFileHandle(_ handle: OpaquePointer) {
+    /// Execute an operation that may return EAGAIN, retrying with socket poll.
+    /// Returns the final return code. Throws on poll timeout.
+    @discardableResult
+    private func withEAGAINRetry(_ op: () -> Int32) throws -> Int32 {
         if !isNonBlockingIO {
-            _ = ssh2_sftp_close(handle)
-            return
+            return op()
         }
-
         while true {
-            let rc = ssh2_sftp_close(handle)
+            let rc = op()
             if rc == SSH2_ERROR_EAGAIN {
-                do {
-                    try waitSocketReady()
-                } catch {
-                    return
-                }
+                try waitSocketReady()
                 continue
             }
-            return
+            return rc
         }
+    }
+
+    private func closeFileHandle(_ handle: OpaquePointer) {
+        _ = try? withEAGAINRetry { ssh2_sftp_close(handle) }
     }
 
     /// Acquire a cached SFTP file handle, or open a new one.
@@ -146,7 +152,9 @@ final class SFTPSession: @unchecked Sendable {
     func acquireHandle(path: String, forWriting: Bool) throws -> OpaquePointer {
         // If we have a cached handle with compatible mode, reuse it
         if let cached = handleCache[path], cached.forWriting || !forWriting {
-            handleCache[path]!.lastUsed = Date()
+            var updated = cached
+            updated.lastUsed = Date()
+            handleCache[path] = updated
             return cached.handle
         }
 
@@ -156,7 +164,7 @@ final class SFTPSession: @unchecked Sendable {
         }
 
         // Evict least-recently-used if at capacity
-        if handleCache.count >= maxCachedHandles {
+        if handleCache.count >= Self.maxCachedHandles {
             evictLRUHandle()
         }
 
@@ -176,7 +184,12 @@ final class SFTPSession: @unchecked Sendable {
                 LIBSSH2_SFTP_OPENFILE
             )
             if let handle {
-                handleCache[path] = CachedHandle(handle: handle, forWriting: forWriting, lastUsed: Date())
+                handleCache[path] = CachedHandle(
+                    handle: handle,
+                    forWriting: forWriting,
+                    dirty: false,
+                    lastUsed: Date()
+                )
                 return handle
             }
             if shouldRetryEAGAIN() {
@@ -191,6 +204,33 @@ final class SFTPSession: @unchecked Sendable {
     func releaseHandle(path: String) {
         if let entry = handleCache.removeValue(forKey: path) {
             closeFileHandle(entry.handle)
+        }
+    }
+
+    /// Flush buffered server-side state for a specific open write handle if needed.
+    func syncHandle(path: String) throws {
+        guard var entry = handleCache[path], entry.forWriting else { return }
+        guard entry.dirty else { return }
+        let rc = try withEAGAINRetry { ssh2_sftp_fsync(entry.handle) }
+        if rc != 0 {
+            let error = sftpError("fsync failed for \(path)")
+            if case .sftpCodedError(_, let code) = error, code == SFTPErrorCode.opUnsupported.rawValue {
+                entry.dirty = false
+                entry.lastUsed = Date()
+                handleCache[path] = entry
+                return
+            }
+            throw error
+        }
+        entry.dirty = false
+        entry.lastUsed = Date()
+        handleCache[path] = entry
+    }
+
+    /// Flush all dirty write handles currently cached in this session.
+    func syncAllWriteHandles() throws {
+        for path in Array(handleCache.keys) {
+            try syncHandle(path: path)
         }
     }
 
@@ -293,7 +333,7 @@ final class SFTPSession: @unchecked Sendable {
 
             // Set blocking mode and SSH-level timeout
             libssh2_session_set_blocking(session, 1)
-            ssh2_session_set_timeout(session, 10_000) // 10s SSH operation timeout
+            ssh2_session_set_timeout(session, Self.sshTimeoutMs) // 10s SSH operation timeout
 
             // 4. SSH handshake
             let hsrc = libssh2_session_handshake(session, sock)
@@ -373,41 +413,11 @@ final class SFTPSession: @unchecked Sendable {
     func disconnect() {
         releaseAllHandles()
         if let sftp = sftpSession {
-            if isNonBlockingIO {
-                while true {
-                    let rc = libssh2_sftp_shutdown(sftp)
-                    if rc == SSH2_ERROR_EAGAIN {
-                        do {
-                            try waitSocketReady()
-                        } catch {
-                            break
-                        }
-                        continue
-                    }
-                    break
-                }
-            } else {
-                libssh2_sftp_shutdown(sftp)
-            }
+            _ = try? withEAGAINRetry { libssh2_sftp_shutdown(sftp) }
             sftpSession = nil
         }
         if let session = sshSession {
-            if isNonBlockingIO {
-                while true {
-                    let rc = ssh2_session_disconnect(session, "bye")
-                    if rc == SSH2_ERROR_EAGAIN {
-                        do {
-                            try waitSocketReady()
-                        } catch {
-                            break
-                        }
-                        continue
-                    }
-                    break
-                }
-            } else {
-                _ = ssh2_session_disconnect(session, "bye")
-            }
+            _ = try? withEAGAINRetry { ssh2_session_disconnect(session, "bye") }
             libssh2_session_free(session)
             sshSession = nil
         }
@@ -423,29 +433,52 @@ final class SFTPSession: @unchecked Sendable {
 
     // MARK: - Connection Status & Reconnect
 
-    /// Probe whether the connection is alive by doing an actual SFTP round-trip.
-    /// An SFTP stat on "." requires the server to reply.
-    func sendKeepalive(timeoutMs: Int32 = 3_000) -> Bool {
+    /// Probe SSH transport health using libssh2 keepalive.
+    func sendSSHKeepalive(timeoutMs: Int32 = 3_000) -> Bool {
+        guard let session = sshSession else { return false }
+        let effectiveTimeout = max(1_000, timeoutMs)
+        ssh2_session_set_timeout(session, Int(effectiveTimeout))
+        defer { ssh2_session_set_timeout(session, Self.sshTimeoutMs) }
+        var secondsToNext: Int32 = 0
+        return ssh2_keepalive_send(session, &secondsToNext) == 0
+    }
+
+    /// Probe SFTP command path health via stat(".").
+    func probeSFTP(timeoutMs: Int32 = 3_000) -> Bool {
         guard let session = sshSession, let sftp = sftpSession else { return false }
         let effectiveTimeout = max(1_000, timeoutMs)
         ssh2_session_set_timeout(session, Int(effectiveTimeout))
-        defer { ssh2_session_set_timeout(session, 10_000) }
+        defer { ssh2_session_set_timeout(session, Self.sshTimeoutMs) }
         var attrs = LIBSSH2_SFTP_ATTRIBUTES()
         return libssh2_sftp_stat_ex(sftp, ".", 1, LIBSSH2_SFTP_STAT, &attrs) == 0
     }
 
     /// Classify whether an error indicates the SSH/SFTP connection is broken.
     static func isConnectionError(_ error: Error) -> Bool {
-        let msg = error.localizedDescription.lowercased()
-        // libssh2 / SFTP session-level failures
-        if msg.contains("no session") || msg.contains("connection") ||
-           msg.contains("socket") || msg.contains("handshake") ||
-           msg.contains("sftp init failed") {
+        let transportCodes: Set<POSIXErrorCode> = [.EIO, .ECONNRESET, .EPIPE, .ETIMEDOUT, .ENETDOWN, .ENETRESET]
+
+        if let mountError = error as? MountError {
+            switch mountError {
+            case .connectionFailed:
+                return true
+            case .sftpError:
+                return true
+            case .sftpCodedError(_, let code):
+                return code == SFTPErrorCode.noConnection.rawValue ||
+                       code == SFTPErrorCode.connectionLost.rawValue
+            default:
+                return false
+            }
+        }
+
+        if let posix = error as? POSIXError,
+           transportCodes.contains(posix.code) {
             return true
         }
-        // POSIX-level I/O errors that typically mean the pipe is dead
-        if let posix = error as? POSIXError,
-           [.EIO, .ECONNRESET, .EPIPE, .ETIMEDOUT, .ENETDOWN, .ENETRESET].contains(posix.code) {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain,
+           let code = POSIXErrorCode(rawValue: Int32(nsError.code)),
+           transportCodes.contains(code) {
             return true
         }
         return false
@@ -510,16 +543,14 @@ final class SFTPSession: @unchecked Sendable {
     func readDirectory(path: String) throws -> [SFTPDirectoryEntry] {
         guard let sftp = sftpSession else { throw MountError.sftpError("No session") }
 
-        let handle = ssh2_sftp_opendir(sftp, path)
-        guard handle != nil else {
+        guard let handle = ssh2_sftp_opendir(sftp, path) else {
             throw sftpError("opendir failed for \(path)")
         }
-        defer { ssh2_sftp_closedir(handle) }
+        defer { _ = ssh2_sftp_closedir(handle) }
 
         var entries: [SFTPDirectoryEntry] = []
-        let bufSize = 512
-        let buf = UnsafeMutablePointer<CChar>.allocate(capacity: bufSize)
-        let longBuf = UnsafeMutablePointer<CChar>.allocate(capacity: bufSize)
+        let buf = UnsafeMutablePointer<CChar>.allocate(capacity: Self.dirReadBufSize)
+        let longBuf = UnsafeMutablePointer<CChar>.allocate(capacity: Self.dirReadBufSize)
         defer {
             buf.deallocate()
             longBuf.deallocate()
@@ -528,7 +559,7 @@ final class SFTPSession: @unchecked Sendable {
         var attrs = LIBSSH2_SFTP_ATTRIBUTES()
 
         while true {
-            let rc = libssh2_sftp_readdir_ex(handle, buf, bufSize, longBuf, bufSize, &attrs)
+            let rc = libssh2_sftp_readdir_ex(handle, buf, Self.dirReadBufSize, longBuf, Self.dirReadBufSize, &attrs)
             if rc <= 0 { break }
 
             let name = String(cString: buf)
@@ -626,6 +657,12 @@ final class SFTPSession: @unchecked Sendable {
             totalWritten += rc
         }
 
+        if var entry = handleCache[path] {
+            entry.dirty = entry.dirty || totalWritten > 0
+            entry.lastUsed = Date()
+            handleCache[path] = entry
+        }
+
         return totalWritten
     }
 
@@ -656,13 +693,40 @@ final class SFTPSession: @unchecked Sendable {
 
     func rename(from oldPath: String, to newPath: String) throws {
         guard let sftp = sftpSession else { throw MountError.sftpError("No session") }
-        let rc = libssh2_sftp_rename_ex(
-            sftp,
-            oldPath, UInt32(oldPath.utf8.count),
-            newPath, UInt32(newPath.utf8.count),
-            Int(LIBSSH2_SFTP_RENAME_OVERWRITE | LIBSSH2_SFTP_RENAME_ATOMIC | LIBSSH2_SFTP_RENAME_NATIVE)
-        )
-        guard rc == 0 else { throw sftpError("rename failed \(oldPath) → \(newPath)") }
+
+        // 1) Prefer OpenSSH posix-rename extension.
+        let posixRC = try withEAGAINRetry {
+            ssh2_sftp_posix_rename_ex(
+                sftp,
+                oldPath, UInt32(oldPath.utf8.count),
+                newPath, UInt32(newPath.utf8.count)
+            )
+        }
+        if posixRC == 0 { return }
+
+        // 2) Fallback to atomic/native/overwrite flags.
+        let atomicRC = try withEAGAINRetry {
+            libssh2_sftp_rename_ex(
+                sftp,
+                oldPath, UInt32(oldPath.utf8.count),
+                newPath, UInt32(newPath.utf8.count),
+                Int(LIBSSH2_SFTP_RENAME_OVERWRITE | LIBSSH2_SFTP_RENAME_ATOMIC | LIBSSH2_SFTP_RENAME_NATIVE)
+            )
+        }
+        if atomicRC == 0 { return }
+
+        // 3) Final fallback: overwrite only.
+        let overwriteRC = try withEAGAINRetry {
+            libssh2_sftp_rename_ex(
+                sftp,
+                oldPath, UInt32(oldPath.utf8.count),
+                newPath, UInt32(newPath.utf8.count),
+                Int(LIBSSH2_SFTP_RENAME_OVERWRITE)
+            )
+        }
+        guard overwriteRC == 0 else {
+            throw sftpError("rename failed \(oldPath) → \(newPath)")
+        }
     }
 
     func symlink(target: String, linkPath: String) throws {
@@ -734,14 +798,13 @@ final class SFTPSession: @unchecked Sendable {
 
     // MARK: - Metadata
 
-    func stat(path: String, followSymlinks: Bool = true) throws -> SFTPFileAttributes {
+    func stat(path: String) throws -> SFTPFileAttributes {
         guard let sftp = sftpSession else { throw MountError.sftpError("No session") }
 
         var attrs = LIBSSH2_SFTP_ATTRIBUTES()
-        let statType = followSymlinks ? LIBSSH2_SFTP_STAT : LIBSSH2_SFTP_LSTAT
         let rc = libssh2_sftp_stat_ex(
             sftp, path, UInt32(path.utf8.count),
-            statType, &attrs
+            LIBSSH2_SFTP_STAT, &attrs
         )
         guard rc == 0 else { throw sftpError("stat failed for \(path)") }
 
@@ -754,7 +817,6 @@ final class SFTPSession: @unchecked Sendable {
             permissions: UInt32(mode & 0o7777),
             uid: UInt32(attrs.uid),
             gid: UInt32(attrs.gid),
-            accessedAt: Date(timeIntervalSince1970: TimeInterval(attrs.atime)),
             modifiedAt: Date(timeIntervalSince1970: TimeInterval(attrs.mtime)),
             isDirectory: isDir,
             isSymlink: isSymlink
@@ -785,6 +847,7 @@ final class SFTPSession: @unchecked Sendable {
             return MountError.sftpError(msg)
         }
         let code = libssh2_sftp_last_error(sftp)
-        return MountError.sftpError("\(msg) (SFTP error \(code))")
+        let codeName = SFTPErrorCode(rawValue: UInt(code))?.description ?? "unknown"
+        return MountError.sftpCodedError("\(msg) (\(codeName), code \(code))", code: UInt(code))
     }
 }

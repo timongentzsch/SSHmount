@@ -75,12 +75,13 @@ final class SSHMountFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             }
         }
 
-        if optionsDict["nodev"] != nil {
-            reply(nil, MountError.invalidFormat("Unsupported mount option: nodev"))
+        let mountOpts: MountOptions
+        do {
+            mountOpts = try MountOptions(from: optionsDict)
+        } catch {
+            reply(nil, error)
             return
         }
-
-        let mountOpts = MountOptions(from: optionsDict)
         if !optionsDict.isEmpty {
             var redactedOptions = optionsDict
             if redactedOptions["auth_password"] != nil {
@@ -124,58 +125,72 @@ final class SSHMountFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
         // Create the health monitor
         let monitor = ConnectionHealthMonitor(
-            keepaliveIntervalSeconds: mountOpts.keepaliveInterval,
-            requiredConsecutiveFailures: mountOpts.keepaliveFailures
+            healthIntervalSeconds: mountOpts.healthInterval,
+            healthTimeoutSeconds: mountOpts.healthTimeout,
+            requiredConsecutiveFailures: mountOpts.healthFailures,
+            busyThreshold: mountOpts.busyThreshold,
+            graceSeconds: mountOpts.graceSeconds
         )
 
-        // Optional extra read sessions for parallel read throughput.
-        // Each session has its own serial queue in SSHMountVolume.
-        let ioMode: SFTPSession.IOMode = mountOpts.nonBlockingIO ? .nonBlocking : .blocking
-        var readSessions: [SFTPSession] = []
-        if mountOpts.parallelSessions > 1 {
-            for idx in 1..<mountOpts.parallelSessions {
-                let readSession = SFTPSession(
-                    host: connInfo.hostname,
-                    port: connInfo.port,
-                    connectionInfo: connInfo,
-                    options: mountOpts,
-                    ioMode: ioMode
-                )
-                do {
-                    try readSession.connect(authMethods: authMethods)
-                    readSessions.append(readSession)
-                } catch {
-                    readSession.disconnect()
-                    Log.fs.notice("parallel_sessions: failed to initialize read session \(idx + 1, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    break
-                }
-            }
-            Log.fs.info("parallel_sessions requested=\(mountOpts.parallelSessions, privacy: .public) active=\(readSessions.count + 1, privacy: .public)")
+        // Dedicated lightweight SSH session for keepalive probes.
+        // Runs on its own queue so probes are never blocked by I/O load.
+        let keepaliveSession = SFTPSession(
+            host: connInfo.hostname,
+            port: connInfo.port,
+            connectionInfo: connInfo,
+            options: mountOpts
+        )
+        do {
+            try keepaliveSession.connect(authMethods: authMethods)
+        } catch {
+            Log.fs.notice("keepalive session failed to connect, falling back to primary: \(error.localizedDescription, privacy: .public)")
+            sftp.disconnect()
+            reply(nil, error)
+            return
         }
 
-        // Dedicated write sessions for non-blocking I/O loops.
-        var writeSessions: [SFTPSession] = []
-        if mountOpts.nonBlockingIO {
-            let requestedWriteSessions = mountOpts.parallelWriteSessions
-            for idx in 0..<requestedWriteSessions {
-                let ioWriteSession = SFTPSession(
-                    host: connInfo.hostname,
-                    port: connInfo.port,
-                    connectionInfo: connInfo,
-                    options: mountOpts,
-                    ioMode: .nonBlocking
-                )
-                do {
-                    try ioWriteSession.connect(authMethods: authMethods)
-                    writeSessions.append(ioWriteSession)
-                } catch {
-                    ioWriteSession.disconnect()
-                    Log.fs.notice("parallel_write_sessions: failed to initialize write session \(idx + 1, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    break
-                }
+        // Dedicated read workers — primary session handles metadata only when workers exist.
+        let workerIOMode: SFTPSession.IOMode = mountOpts.ioMode == .nonblocking ? .nonBlocking : .blocking
+        var readSessions: [SFTPSession] = []
+        for idx in 0..<mountOpts.readWorkers {
+            let session = SFTPSession(
+                host: connInfo.hostname,
+                port: connInfo.port,
+                connectionInfo: connInfo,
+                options: mountOpts,
+                ioMode: workerIOMode
+            )
+            do {
+                try session.connect(authMethods: authMethods)
+                readSessions.append(session)
+            } catch {
+                session.disconnect()
+                Log.fs.notice("read worker \(idx, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                break
             }
-            Log.fs.info("parallel_write_sessions requested=\(mountOpts.parallelWriteSessions, privacy: .public) active=\(writeSessions.count, privacy: .public)")
         }
+        Log.fs.info("read workers: requested=\(mountOpts.readWorkers, privacy: .public) active=\(readSessions.count, privacy: .public)")
+
+        // Dedicated write workers.
+        var writeSessions: [SFTPSession] = []
+        for idx in 0..<mountOpts.writeWorkers {
+            let session = SFTPSession(
+                host: connInfo.hostname,
+                port: connInfo.port,
+                connectionInfo: connInfo,
+                options: mountOpts,
+                ioMode: workerIOMode
+            )
+            do {
+                try session.connect(authMethods: authMethods)
+                writeSessions.append(session)
+            } catch {
+                session.disconnect()
+                Log.fs.notice("write worker \(idx, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                break
+            }
+        }
+        Log.fs.info("write workers: requested=\(mountOpts.writeWorkers, privacy: .public) active=\(writeSessions.count, privacy: .public)")
 
         // Create the volume (wires up health monitor callbacks in init)
         let volumeID = FSVolume.Identifier(uuid: UUID())
@@ -184,6 +199,7 @@ final class SSHMountFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             volumeID: volumeID,
             volumeName: volumeName,
             sftp: sftp,
+            keepaliveSession: keepaliveSession,
             readSessions: readSessions,
             writeSessions: writeSessions,
             remotePath: remotePath,

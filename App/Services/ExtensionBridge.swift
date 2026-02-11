@@ -55,26 +55,36 @@ final class ExtensionBridge: @unchecked Sendable {
     }
 
     /// Unmount a mount point. Does not throw if already unmounted.
-    func requestUnmount(localPath: String) async throws {
+    /// If `force` is true, uses `umount -f`.
+    func requestUnmount(localPath: String, force: Bool = false) async throws {
         let resolved = Self.expandTilde(localPath)
         guard !resolved.isEmpty else {
             Log.bridge.debug("Skipping unmount: empty path")
             return
         }
-        Log.bridge.debug("Requesting unmount: \(resolved)")
-        let result = try await run("/sbin/umount", arguments: [resolved])
+        let args = force ? ["-f", resolved] : [resolved]
+        Log.bridge.debug("Requesting \(force ? "force " : "")unmount: \(resolved)")
+        let result = try await run("/sbin/umount", arguments: args)
 
         if result.exitCode != 0 {
             let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             // "not currently mounted" is fine — already in desired state
-            if stderr.contains("not currently mounted") {
+            if MountError.isAlreadyUnmountedMessage(stderr) {
                 Log.bridge.debug("Already unmounted: \(resolved)")
             } else {
                 Log.bridge.error("Unmount failed: \(stderr) (exit \(result.exitCode))")
-                throw MountError.mountFailed(stderr.isEmpty ? "umount failed" : stderr)
+                let detail = MountError.unmountFailureMessage(
+                    localPath: resolved,
+                    stderr: stderr,
+                    exitCode: result.exitCode
+                )
+                if force {
+                    throw MountError.mountFailed("\(detail). \(MountError.daemonRecoveryHint)")
+                }
+                throw MountError.mountFailed("\(detail). Retry with Force Unmount.")
             }
         } else {
-            Log.bridge.debug("Unmount succeeded: \(resolved)")
+            Log.bridge.debug("\(force ? "Force u" : "U")nmount succeeded: \(resolved)")
         }
 
         // Clean up auto-created mount point directory under ~/Volumes
@@ -110,20 +120,10 @@ final class ExtensionBridge: @unchecked Sendable {
 
     // MARK: - Path Helpers
 
-    /// Resolve the real login user's home directory outside app-container redirection.
-    static var realHomeDirectory: String {
-        SSHConfigParser.realHomeDirectory
-    }
+    static var realHomeDirectory: String { PathUtilities.realHomeDirectory }
 
-    /// Expand `~` or `~/...` to the user's home directory.
     static func expandTilde(_ path: String) -> String {
-        guard path.hasPrefix("~") else { return path }
-        let home = realHomeDirectory
-        if path == "~" { return home }
-        if path.hasPrefix("~/") {
-            return home + path.dropFirst(1) // replace ~ with home
-        }
-        return path
+        PathUtilities.expandTilde(path)
     }
 
     /// Build a Finder-friendly mount point directory name from the user's label.
@@ -189,42 +189,11 @@ final class ExtensionBridge: @unchecked Sendable {
 
     // MARK: - Process Helper
 
-    struct ProcessResult {
-        let exitCode: Int32
-        let stdout: String
-        let stderr: String
+    func runCommand(_ path: String, arguments: [String]) async throws -> ProcessRunner.Result {
+        try await ProcessRunner.runAsync(path, arguments: arguments)
     }
 
-    func runCommand(_ path: String, arguments: [String]) async throws -> ProcessResult {
-        try await run(path, arguments: arguments)
-    }
-
-    private func run(_ path: String, arguments: [String]) async throws -> ProcessResult {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            process.terminationHandler = { proc in
-                let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                continuation.resume(returning: ProcessResult(
-                    exitCode: proc.terminationStatus,
-                    stdout: stdout,
-                    stderr: stderr
-                ))
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
+    private func run(_ path: String, arguments: [String]) async throws -> ProcessRunner.Result {
+        try await ProcessRunner.runAsync(path, arguments: arguments)
     }
 }
