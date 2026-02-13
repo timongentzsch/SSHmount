@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct NewMountView: View {
+struct MountView: View {
     @ObservedObject var manager: MountManager
     var onDismiss: () -> Void
     /// If set, we're editing an existing saved config.
@@ -37,6 +37,10 @@ struct NewMountView: View {
 
     private var canSubmit: Bool {
         hostAliasIsValid && !remotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var sshConfigPath: String {
+        PathUtilities.realHomeDirectory + "/.ssh/config"
     }
 
     var body: some View {
@@ -140,6 +144,7 @@ struct NewMountView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -210,6 +215,7 @@ struct NewMountView: View {
                 Text("Nonblocking").tag(MountIOMode.nonblocking)
             }
             .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(profile == .git)
 
             HStack {
@@ -302,7 +308,7 @@ struct NewMountView: View {
             return
         }
 
-        let configPath = PathUtilities.realHomeDirectory + "/.ssh/config"
+        let configPath = sshConfigPath
         if !FileManager.default.fileExists(atPath: configPath) {
             knownHostsDiagnostic = "Config file not found at \(configPath)."
         } else if !FileManager.default.isReadableFile(atPath: configPath) {
@@ -311,6 +317,7 @@ struct NewMountView: View {
             knownHostsDiagnostic = "Config is readable, but contains no concrete Host aliases."
         }
     }
+
 
     private func validateInputs() throws {
         guard hostAliasIsValid else {

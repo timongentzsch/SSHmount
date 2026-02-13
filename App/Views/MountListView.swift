@@ -24,6 +24,13 @@ struct MountListView: View {
     @State private var editingConfig: MountConfig?
     @State private var passwordPromptConfig: MountConfig?
 
+    private var windowWidth: CGFloat {
+        if showNewMount || editingConfig != nil {
+            return 560
+        }
+        return 320
+    }
+
     /// Saved configs that are NOT currently mounted.
     private var inactiveSavedConfigs: [MountConfig] {
         let activeConfigIDs = Set(manager.mounts.map(\.config.id))
@@ -62,7 +69,7 @@ struct MountListView: View {
                 )
                 .transition(.opacity)
             } else if showNewMount || editingConfig != nil {
-                NewMountView(
+                MountView(
                     manager: manager,
                     onDismiss: {
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -79,7 +86,7 @@ struct MountListView: View {
             }
         }
         .padding(.vertical, 8)
-        .frame(width: 320)
+        .frame(width: windowWidth)
         .animation(.easeInOut(duration: 0.2), value: showOnboarding)
         .animation(.easeInOut(duration: 0.2), value: showNewMount)
         .animation(.easeInOut(duration: 0.2), value: editingConfig?.id)
@@ -258,10 +265,16 @@ struct MountListView: View {
             }
             Divider()
 
-            Button("Quit") {
-                Task {
-                    await manager.unmountAll()
-                    NSApplication.shared.terminate(nil)
+            HStack {
+                Button("Open SSH Config") {
+                    openSSHConfig()
+                }
+                Spacer()
+                Button("Quit") {
+                    Task {
+                        await manager.unmountAll()
+                        NSApplication.shared.terminate(nil)
+                    }
                 }
             }
             .padding(.horizontal)
@@ -463,4 +476,40 @@ private func openInFinder(path: String) {
 /// Replace the user's home directory prefix with ~
 private func abbreviateHome(_ path: String) -> String {
     PathUtilities.abbreviateHome(path)
+}
+
+/// Open ~/.ssh/config in the default editor, creating it if needed.
+private func openSSHConfig() {
+    let configPath = PathUtilities.realHomeDirectory + "/.ssh/config"
+    let configDirectory = (configPath as NSString).deletingLastPathComponent
+    let fileManager = FileManager.default
+    let workspace = NSWorkspace.shared
+    let fileURL = URL(fileURLWithPath: configPath)
+
+    if !fileManager.fileExists(atPath: configDirectory) {
+        try? fileManager.createDirectory(atPath: configDirectory, withIntermediateDirectories: true)
+    }
+
+    if !fileManager.fileExists(atPath: configPath) {
+        try? "".write(toFile: configPath, atomically: true, encoding: .utf8)
+    }
+
+    let preferredBundleIDs = [
+        "com.microsoft.VSCode",
+        "com.microsoft.VSCodeInsiders",
+    ]
+
+    for bundleID in preferredBundleIDs {
+        if let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID) {
+            workspace.open(
+                [fileURL],
+                withApplicationAt: appURL,
+                configuration: NSWorkspace.OpenConfiguration(),
+                completionHandler: { _, _ in }
+            )
+            return
+        }
+    }
+
+    workspace.open(fileURL)
 }

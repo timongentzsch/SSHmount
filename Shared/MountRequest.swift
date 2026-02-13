@@ -121,12 +121,6 @@ enum MountError: LocalizedError {
         return SFTPErrorCode(rawValue: code)?.posixCode ?? .EIO
     }
 
-    /// Whether this is an authentication failure.
-    var isAuthError: Bool {
-        if case .authFailed = self { return true }
-        return false
-    }
-
     static func isAlreadyUnmountedMessage(_ stderr: String) -> Bool {
         let normalized = stderr.lowercased()
         return normalized.contains("not currently mounted")
