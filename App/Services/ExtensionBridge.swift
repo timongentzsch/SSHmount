@@ -16,11 +16,11 @@ final class ExtensionBridge: @unchecked Sendable {
     func requestMount(_ request: MountRequest) async throws -> String {
         var mountPoint: String
         if request.localPath.isEmpty {
-            let mountsDir = Self.realHomeDirectory + "/Volumes"
+            let mountsDir = PathUtilities.realHomeDirectory + "/Volumes"
             let dirName = mountPointName(label: request.label, hostAlias: request.hostAlias)
             mountPoint = "\(mountsDir)/\(dirName)"
         } else {
-            mountPoint = Self.expandTilde(request.localPath)
+            mountPoint = PathUtilities.expandTilde(request.localPath)
         }
 
         // Create mount point if needed
@@ -57,7 +57,7 @@ final class ExtensionBridge: @unchecked Sendable {
     /// Unmount a mount point. Does not throw if already unmounted.
     /// If `force` is true, uses `umount -f`.
     func requestUnmount(localPath: String, force: Bool = false) async throws {
-        let resolved = Self.expandTilde(localPath)
+        let resolved = PathUtilities.expandTilde(localPath)
         guard !resolved.isEmpty else {
             Log.bridge.debug("Skipping unmount: empty path")
             return
@@ -88,7 +88,7 @@ final class ExtensionBridge: @unchecked Sendable {
         }
 
         // Clean up auto-created mount point directory under ~/Volumes
-        let userVolumes = Self.realHomeDirectory + "/Volumes"
+        let userVolumes = PathUtilities.realHomeDirectory + "/Volumes"
         if resolved.hasPrefix(userVolumes) {
             try? FileManager.default.removeItem(atPath: resolved)
         }
@@ -120,12 +120,6 @@ final class ExtensionBridge: @unchecked Sendable {
 
     // MARK: - Path Helpers
 
-    static var realHomeDirectory: String { PathUtilities.realHomeDirectory }
-
-    static func expandTilde(_ path: String) -> String {
-        PathUtilities.expandTilde(path)
-    }
-
     /// Build a Finder-friendly mount point directory name from the user's label.
     /// Falls back to hostAlias if label is nil or empty.
     private func mountPointName(label: String?, hostAlias: String) -> String {
@@ -136,14 +130,10 @@ final class ExtensionBridge: @unchecked Sendable {
         var result = sanitizePathComponent(raw, allowSpaces: true)
         result = collapseRepeatedDashes(result)
         result = result.trimmingCharacters(in: CharacterSet(charactersIn: "- "))
-        return result.isEmpty ? sanitizePathComponent(hostAlias) : result
+        return result.isEmpty ? sanitizePathComponent(hostAlias, allowSpaces: false) : result
     }
 
-    private func sanitizePathComponent(_ value: String) -> String {
-        sanitizePathComponent(value, allowSpaces: false)
-    }
-
-    private func sanitizePathComponent(_ value: String, allowSpaces: Bool) -> String {
+    private func sanitizePathComponent(_ value: String, allowSpaces: Bool = false) -> String {
         let filtered = value.map { ch -> Character in
             if ch.isLetter || ch.isNumber || ch == "-" || ch == "_" || ch == "." {
                 return ch
@@ -189,11 +179,7 @@ final class ExtensionBridge: @unchecked Sendable {
 
     // MARK: - Process Helper
 
-    func runCommand(_ path: String, arguments: [String]) async throws -> ProcessRunner.Result {
-        try await ProcessRunner.runAsync(path, arguments: arguments)
-    }
-
-    private func run(_ path: String, arguments: [String]) async throws -> ProcessRunner.Result {
+    func run(_ path: String, arguments: [String]) async throws -> ProcessRunner.Result {
         try await ProcessRunner.runAsync(path, arguments: arguments)
     }
 }

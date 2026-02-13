@@ -276,15 +276,11 @@ struct MountView: View {
             cacheDirSeconds = Int(opts.dirCacheTimeout.rounded())
         }
 
+        // Warn if the saved alias no longer exists, then fall back to the first known host.
         if !hostAlias.isEmpty && !knownHosts.contains(hostAlias) {
             errorMessage = "Saved host alias '\(hostAlias)' is no longer defined in ~/.ssh/config."
         }
-
         if !knownHosts.contains(hostAlias), let first = knownHosts.first {
-            hostAlias = first
-        }
-
-        if hostAlias.isEmpty, let first = knownHosts.first {
             hostAlias = first
         }
     }
@@ -318,7 +314,6 @@ struct MountView: View {
         }
     }
 
-
     private func validateInputs() throws {
         guard hostAliasIsValid else {
             throw MountError.invalidFormat("Host alias '\(hostAlias)' is not defined in ~/.ssh/config")
@@ -348,17 +343,24 @@ struct MountView: View {
         )
     }
 
+    /// Build a MountConfig from the current form state.
+    /// Reuses the existing config's ID when editing.
+    private func buildConfig() throws -> MountConfig {
+        try validateInputs()
+        return MountConfig(
+            id: editing?.id ?? UUID(),
+            label: label,
+            hostAlias: hostAlias,
+            remotePath: remotePath.trimmingCharacters(in: .whitespacesAndNewlines),
+            localPath: resolvedLocalPath,
+            mountOnLaunch: mountOnLaunch,
+            options: currentOptions()
+        )
+    }
+
     private func doMount() {
         do {
-            try validateInputs()
-            let config = MountConfig(
-                label: label,
-                hostAlias: hostAlias,
-                remotePath: remotePath.trimmingCharacters(in: .whitespacesAndNewlines),
-                localPath: resolvedLocalPath,
-                mountOnLaunch: mountOnLaunch,
-                options: currentOptions()
-            )
+            let config = try buildConfig()
             manager.saveConfig(config)
 
             Task {
@@ -381,19 +383,8 @@ struct MountView: View {
     }
 
     private func doSave() {
-        guard let existing = editing else { return }
-
         do {
-            try validateInputs()
-            let config = MountConfig(
-                id: existing.id,
-                label: label,
-                hostAlias: hostAlias,
-                remotePath: remotePath.trimmingCharacters(in: .whitespacesAndNewlines),
-                localPath: resolvedLocalPath,
-                mountOnLaunch: mountOnLaunch,
-                options: currentOptions()
-            )
+            let config = try buildConfig()
             manager.saveConfig(config)
             onDismiss()
         } catch {

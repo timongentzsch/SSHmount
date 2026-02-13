@@ -47,17 +47,6 @@ struct MountConfig: Codable, Identifiable, Sendable {
         label = decodedLabel.isEmpty ? "\(hostAlias):\(remotePath)" : decodedLabel
     }
 
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(id, forKey: .id)
-        try c.encode(label, forKey: .label)
-        try c.encode(hostAlias, forKey: .hostAlias)
-        try c.encode(remotePath, forKey: .remotePath)
-        try c.encode(localPath, forKey: .localPath)
-        try c.encode(mountOnLaunch, forKey: .mountOnLaunch)
-        try c.encode(options, forKey: .options)
-    }
-
     func toRequest(sessionPassword: String? = nil) -> MountRequest {
         MountRequest(
             hostAlias: hostAlias,

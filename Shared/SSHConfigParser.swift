@@ -32,11 +32,8 @@ struct SSHConfigParser {
     private var entries: [ParsedEntry] = []
     private var concreteAliases: Set<String> = []
 
-    /// Get the real user home directory (bypasses sandbox container redirection).
-    static var realHomeDirectory: String { PathUtilities.realHomeDirectory }
-
     init() {
-        let root = URL(fileURLWithPath: Self.realHomeDirectory)
+        let root = URL(fileURLWithPath: PathUtilities.realHomeDirectory)
             .appendingPathComponent(".ssh", isDirectory: true)
             .appendingPathComponent("config", isDirectory: false)
 
@@ -223,7 +220,7 @@ struct SSHConfigParser {
     }
 
     private func resolveIncludePaths(token: String, relativeTo configFile: URL) -> [URL] {
-        let home = Self.realHomeDirectory
+        let home = PathUtilities.realHomeDirectory
         let resolvedToken: String
 
         if token.hasPrefix("~/") {
@@ -281,7 +278,7 @@ struct SSHConfigParser {
         let port = Int(values["port"]?.first ?? "") ?? 22
 
         let expandedKeys = (values["identityfile"] ?? [])
-            .map { expandHome(in: $0) }
+            .map { PathUtilities.expandTilde($0) }
         let existingKeys = existingIdentityFiles(from: expandedKeys)
 
         return SSHConnectionInfo(
@@ -300,7 +297,7 @@ struct SSHConfigParser {
         process.arguments = ["-G", alias]
 
         var env = ProcessInfo.processInfo.environment
-        env["HOME"] = Self.realHomeDirectory
+        env["HOME"] = PathUtilities.realHomeDirectory
         process.environment = env
 
         let stdout = Pipe()
@@ -343,7 +340,7 @@ struct SSHConfigParser {
         let port = merged.port ?? 22
         let user = merged.user ?? NSUserName()
 
-        let expandedKeys = merged.identityFiles.map { expandHome(in: $0) }
+        let expandedKeys = merged.identityFiles.map { PathUtilities.expandTilde($0) }
         let existingKeys = existingIdentityFiles(from: expandedKeys)
 
         return SSHConnectionInfo(
@@ -359,17 +356,13 @@ struct SSHConfigParser {
     private func existingIdentityFiles(from paths: [String]) -> [String] {
         let candidates: [String]
         if paths.isEmpty {
-            let home = Self.realHomeDirectory
+            let home = PathUtilities.realHomeDirectory
             candidates = ["id_ed25519", "id_rsa", "id_ecdsa"].map { "\(home)/.ssh/\($0)" }
         } else {
             candidates = paths
         }
 
         return candidates.filter { FileManager.default.fileExists(atPath: $0) }
-    }
-
-    private func expandHome(in path: String) -> String {
-        PathUtilities.expandTilde(path)
     }
 
     // MARK: - Pattern Matching

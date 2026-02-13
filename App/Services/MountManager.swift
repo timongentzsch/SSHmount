@@ -1,5 +1,14 @@
 import SwiftUI
 
+// MARK: - Shared Animation Constants
+
+extension Animation {
+    /// Standard transition for mount state changes (connect/disconnect/error).
+    static let mountTransition = Animation.easeInOut(duration: 0.3)
+    /// Quick transition for UI panel swaps (show/hide views).
+    static let viewTransition = Animation.easeInOut(duration: 0.2)
+}
+
 // MARK: - Aggregate Connection Status
 
 enum AggregateConnectionStatus {
@@ -112,7 +121,7 @@ final class MountManager: ObservableObject {
     func mountWithResult(_ config: MountConfig, sessionPassword: String? = nil) async -> MountResult {
         var resolvedConfig = config
         let entry = MountEntry(config: config, status: .connecting)
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(.mountTransition) {
             mounts.append(entry)
         }
 
@@ -122,7 +131,7 @@ final class MountManager: ObservableObject {
             )
             resolvedConfig.localPath = mountPoint
             if let idx = mounts.firstIndex(where: { $0.id == entry.id }) {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(.mountTransition) {
                     mounts[idx].config = resolvedConfig
                     mounts[idx].status = .connected
                     mounts[idx].connectedSince = Date()
@@ -133,7 +142,7 @@ final class MountManager: ObservableObject {
             let isAuthError = Self.isAuthenticationError(error)
 
             if let idx = mounts.firstIndex(where: { $0.id == entry.id }) {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(.mountTransition) {
                     mounts[idx].status = .error(error.localizedDescription)
                 }
             }
@@ -145,13 +154,13 @@ final class MountManager: ObservableObject {
     func unmount(_ entry: MountEntry, force: Bool = false) async {
         do {
             try await ExtensionBridge.shared.requestUnmount(localPath: entry.config.localPath, force: force)
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(.mountTransition) {
                 mounts.removeAll { $0.id == entry.id }
             }
         } catch {
             Log.app.error("\(force ? "Force u" : "U")nmount error: \(error.localizedDescription)")
             if let idx = mounts.firstIndex(where: { $0.id == entry.id }) {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(.mountTransition) {
                     mounts[idx].status = .error(Self.userFacingUnmountError(error, force: force))
                 }
             }
@@ -166,7 +175,7 @@ final class MountManager: ObservableObject {
                 Log.app.error("\(force ? "Force u" : "U")nmount failed for \(entry.config.localPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(.mountTransition) {
             mounts.removeAll()
         }
     }
@@ -283,7 +292,7 @@ final class MountManager: ObservableObject {
 
     /// Apply extension-reported state to all active mounts.
     private func applyExtensionState(_ status: MountStatus) {
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(.mountTransition) {
             for i in mounts.indices where mounts[i].status.isActive {
                 if status == .connected && mounts[i].status != .connected {
                     mounts[i].connectedSince = Date()
@@ -303,7 +312,7 @@ final class MountManager: ObservableObject {
             .split(separator: "_")
             .map { $0.capitalized }
             .joined(separator: " ")
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(.viewTransition) {
             for i in mounts.indices where mounts[i].status == .reconnecting || mounts[i].status == .unreachable {
                 mounts[i].lastReconnectReason = readable
             }
@@ -312,7 +321,7 @@ final class MountManager: ObservableObject {
 
     /// Extension scheduled a reconnect attempt in `delay` seconds.
     private func applyRetryScheduled(delay: Double) {
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(.mountTransition) {
             for i in mounts.indices where mounts[i].status == .reconnecting {
                 mounts[i].retryAttempt += 1
                 mounts[i].retryNextAt = Date().addingTimeInterval(delay)
@@ -350,7 +359,7 @@ final class MountManager: ObservableObject {
     }
 
     private func markAllUnreachable() {
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(.mountTransition) {
             for i in mounts.indices where mounts[i].status == .connected || mounts[i].status == .reconnecting {
                 mounts[i].status = .unreachable
                 mounts[i].connectedSince = nil
@@ -383,7 +392,7 @@ final class MountManager: ObservableObject {
             for entry in disappeared {
                 Log.app.notice("Mount disappeared: \(entry.config.localPath, privacy: .public)")
             }
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(.mountTransition) {
                 mounts.removeAll { !systemPaths.contains($0.config.localPath) && $0.status != .connecting }
             }
         }
@@ -396,7 +405,7 @@ final class MountManager: ObservableObject {
             for idx in promoteIndices {
                 Log.app.notice("Promoting stale unreachable -> connected for \(self.mounts[idx].config.localPath, privacy: .public) (mount table present)")
             }
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(.mountTransition) {
                 for idx in promoteIndices {
                     self.mounts[idx].status = .connected
                     if self.mounts[idx].connectedSince == nil {
@@ -417,7 +426,7 @@ final class MountManager: ObservableObject {
                     if config.localPath.isEmpty {
                         return config.hostAlias == (mount.remote.host ?? "")
                     }
-                    let expanded = ExtensionBridge.expandTilde(config.localPath)
+                    let expanded = PathUtilities.expandTilde(config.localPath)
                     return expanded == mount.localPath
                 }
                 let config = matchedConfig.map { saved in
@@ -435,7 +444,7 @@ final class MountManager: ObservableObject {
                     remotePath: mount.remote.path,
                     localPath: mount.localPath
                 )
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(.mountTransition) {
                     mounts.append(MountEntry(config: config, status: .connected, connectedSince: Date()))
                 }
                 Log.app.notice("External mount picked up as connected: \(mount.localPath, privacy: .public)")
@@ -508,7 +517,7 @@ final class MountManager: ObservableObject {
 
         var registered = false
         var enabled = false
-        if let result = try? await ExtensionBridge.shared.runCommand(
+        if let result = try? await ExtensionBridge.shared.run(
             "/usr/bin/pluginkit", arguments: ["-m", "-i", "com.sshmount.app.fs"]
         ) {
             let pluginID = "com.sshmount.app.fs"

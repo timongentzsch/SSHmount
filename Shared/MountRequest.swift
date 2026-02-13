@@ -12,6 +12,7 @@ struct MountRequest: Codable, Sendable {
     /// Session-only password. Not persisted in saved config.
     let sessionPassword: String?
 
+    /// sessionPassword is excluded from Codable — it should never be persisted.
     private enum CodingKeys: String, CodingKey {
         case hostAlias, remotePath, localPath, label, options
     }
@@ -40,15 +41,6 @@ struct MountRequest: Codable, Sendable {
         label = try c.decodeIfPresent(String.self, forKey: .label)
         options = try c.decodeIfPresent(MountOptions.self, forKey: .options)
         sessionPassword = nil
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(hostAlias, forKey: .hostAlias)
-        try c.encode(remotePath, forKey: .remotePath)
-        try c.encode(localPath, forKey: .localPath)
-        try c.encodeIfPresent(label, forKey: .label)
-        try c.encodeIfPresent(options, forKey: .options)
     }
 
     /// Parse "alias:/path" into components.
@@ -154,7 +146,7 @@ enum MountError: LocalizedError {
 }
 
 /// SSH_FX_* error codes from the SFTP protocol (draft-ietf-secsh-filexfer).
-enum SFTPErrorCode: UInt, Sendable {
+enum SFTPErrorCode: UInt, Sendable, CustomStringConvertible {
     case ok                 = 0
     case eof                = 1
     case noSuchFile         = 2

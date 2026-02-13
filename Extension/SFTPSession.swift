@@ -33,7 +33,13 @@ private enum LibSSH2Runtime {
     }
 }
 
-struct SFTPDirectoryEntry: Sendable {
+/// Shared protocol for SFTP types that carry file type information.
+protocol SFTPFileTyped {
+    var isDirectory: Bool { get }
+    var isSymlink: Bool { get }
+}
+
+struct SFTPDirectoryEntry: Sendable, SFTPFileTyped {
     let name: String
     let isDirectory: Bool
     let isSymlink: Bool
@@ -42,7 +48,7 @@ struct SFTPDirectoryEntry: Sendable {
     let modifiedAt: Date
 }
 
-struct SFTPFileAttributes: Sendable {
+struct SFTPFileAttributes: Sendable, SFTPFileTyped {
     let size: UInt64
     let permissions: UInt32
     let uid: UInt32

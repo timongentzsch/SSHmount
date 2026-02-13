@@ -23,6 +23,38 @@ final class SSHMountFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         return uuidV5(namespace: namespace, name: key)
     }
 
+    /// Create `count` worker sessions, connecting each in order.
+    /// Stops on first failure and disconnects the failed session.
+    private static func createWorkerSessions(
+        count: Int,
+        label: String,
+        connInfo: SSHConnectionInfo,
+        options: MountOptions,
+        ioMode: SFTPSession.IOMode,
+        authMethods: [SSHAuthMethod]
+    ) -> [SFTPSession] {
+        var sessions: [SFTPSession] = []
+        for idx in 0..<count {
+            let session = SFTPSession(
+                host: connInfo.hostname,
+                port: connInfo.port,
+                connectionInfo: connInfo,
+                options: options,
+                ioMode: ioMode
+            )
+            do {
+                try session.connect(authMethods: authMethods)
+                sessions.append(session)
+            } catch {
+                session.disconnect()
+                Log.fs.notice("\(label) worker \(idx, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                break
+            }
+        }
+        Log.fs.info("\(label) workers: requested=\(count, privacy: .public) active=\(sessions.count, privacy: .public)")
+        return sessions
+    }
+
     /// Probe whether we can handle this resource.
     func probeResource(
         resource: FSResource,
@@ -149,48 +181,18 @@ final class SSHMountFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
             return
         }
 
-        // Dedicated read workers — primary session handles metadata only when workers exist.
+        // Dedicated I/O workers — primary session handles metadata only when workers exist.
         let workerIOMode: SFTPSession.IOMode = mountOpts.ioMode == .nonblocking ? .nonBlocking : .blocking
-        var readSessions: [SFTPSession] = []
-        for idx in 0..<mountOpts.readWorkers {
-            let session = SFTPSession(
-                host: connInfo.hostname,
-                port: connInfo.port,
-                connectionInfo: connInfo,
-                options: mountOpts,
-                ioMode: workerIOMode
-            )
-            do {
-                try session.connect(authMethods: authMethods)
-                readSessions.append(session)
-            } catch {
-                session.disconnect()
-                Log.fs.notice("read worker \(idx, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-                break
-            }
-        }
-        Log.fs.info("read workers: requested=\(mountOpts.readWorkers, privacy: .public) active=\(readSessions.count, privacy: .public)")
-
-        // Dedicated write workers.
-        var writeSessions: [SFTPSession] = []
-        for idx in 0..<mountOpts.writeWorkers {
-            let session = SFTPSession(
-                host: connInfo.hostname,
-                port: connInfo.port,
-                connectionInfo: connInfo,
-                options: mountOpts,
-                ioMode: workerIOMode
-            )
-            do {
-                try session.connect(authMethods: authMethods)
-                writeSessions.append(session)
-            } catch {
-                session.disconnect()
-                Log.fs.notice("write worker \(idx, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-                break
-            }
-        }
-        Log.fs.info("write workers: requested=\(mountOpts.writeWorkers, privacy: .public) active=\(writeSessions.count, privacy: .public)")
+        let readSessions = Self.createWorkerSessions(
+            count: mountOpts.readWorkers, label: "read",
+            connInfo: connInfo, options: mountOpts,
+            ioMode: workerIOMode, authMethods: authMethods
+        )
+        let writeSessions = Self.createWorkerSessions(
+            count: mountOpts.writeWorkers, label: "write",
+            connInfo: connInfo, options: mountOpts,
+            ioMode: workerIOMode, authMethods: authMethods
+        )
 
         // Create the volume (wires up health monitor callbacks in init)
         let volumeID = FSVolume.Identifier(uuid: UUID())

@@ -2,6 +2,17 @@ import Foundation
 @preconcurrency import FSKit
 import CLibSSH2
 
+// MARK: - FSKit Item Type from SFTP Types
+
+@available(macOS 26.0, *)
+extension SFTPFileTyped {
+    var fsItemType: FSItem.ItemType {
+        if isSymlink { return .symlink }
+        if isDirectory { return .directory }
+        return .file
+    }
+}
+
 /// The mounted volume. Implements FSKit volume operations
 /// by translating them into SFTP calls.
 @available(macOS 26.0, *)
@@ -388,14 +399,7 @@ final class SSHMountVolume: FSVolume,
     /// Convert SFTPFileAttributes → FSItem.Attributes.
     private func fsAttributes(from sftpAttrs: SFTPFileAttributes, itemID: UInt64, parentID: UInt64) -> FSItem.Attributes {
         let attrs = FSItem.Attributes()
-        if sftpAttrs.isSymlink {
-            attrs.type = .symlink
-        } else if sftpAttrs.isDirectory {
-            attrs.type = .directory
-        } else {
-            attrs.type = .file
-        }
-
+        attrs.type = sftpAttrs.fsItemType
         attrs.mode = sftpAttrs.permissions
         attrs.uid = sftpAttrs.uid
         attrs.gid = sftpAttrs.gid
@@ -664,14 +668,7 @@ final class SSHMountVolume: FSVolume,
                         : dirPath + "/" + entry.name
                     let childID = self.itemID(forPath: childPath)
 
-                    let itemType: FSItem.ItemType
-                    if entry.isSymlink {
-                        itemType = .symlink
-                    } else if entry.isDirectory {
-                        itemType = .directory
-                    } else {
-                        itemType = .file
-                    }
+                    let itemType = entry.fsItemType
 
                     var entryAttrs: FSItem.Attributes? = nil
                     if attributes != nil {

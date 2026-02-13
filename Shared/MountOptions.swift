@@ -144,11 +144,10 @@ struct MountOptions: Codable, Sendable, Equatable {
             throw MountError.invalidFormat("Unknown mount option '\(key)'.")
         }
 
-        let defaultProfile: MountProfile = .standard
         let parsedProfile = try Self.parseEnum(
             dict,
             key: "profile",
-            defaultValue: defaultProfile
+            defaultValue: MountProfile.standard
         )
 
         let readWorkers = try Self.parseInt(

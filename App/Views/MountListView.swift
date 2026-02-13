@@ -41,7 +41,7 @@ struct MountListView: View {
         VStack(alignment: .leading, spacing: 8) {
             if !hasCompletedOnboarding || showOnboarding {
                 OnboardingView(manager: manager, onDismiss: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(.viewTransition) {
                         hasCompletedOnboarding = true
                         showOnboarding = false
                     }
@@ -53,7 +53,7 @@ struct MountListView: View {
                     message: "SSH key authentication failed for **\(config.label)**. Please enter your password:",
                     actionLabel: "Mount",
                     onSubmit: { password in
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(.viewTransition) {
                             passwordPromptConfig = nil
                         }
                         Task {
@@ -62,7 +62,7 @@ struct MountListView: View {
                         }
                     },
                     onCancel: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(.viewTransition) {
                             passwordPromptConfig = nil
                         }
                     }
@@ -72,7 +72,7 @@ struct MountListView: View {
                 MountView(
                     manager: manager,
                     onDismiss: {
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(.viewTransition) {
                             showNewMount = false
                             editingConfig = nil
                         }
@@ -87,10 +87,10 @@ struct MountListView: View {
         }
         .padding(.vertical, 8)
         .frame(width: windowWidth)
-        .animation(.easeInOut(duration: 0.2), value: showOnboarding)
-        .animation(.easeInOut(duration: 0.2), value: showNewMount)
-        .animation(.easeInOut(duration: 0.2), value: editingConfig?.id)
-        .animation(.easeInOut(duration: 0.2), value: passwordPromptConfig?.id)
+        .animation(.viewTransition, value: showOnboarding)
+        .animation(.viewTransition, value: showNewMount)
+        .animation(.viewTransition, value: editingConfig?.id)
+        .animation(.viewTransition, value: passwordPromptConfig?.id)
     }
 
     private var mountList: some View {
@@ -183,7 +183,7 @@ struct MountListView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(.viewTransition) {
                         showNewMount = true
                     }
                 } label: {
@@ -214,7 +214,7 @@ struct MountListView: View {
                                     let result = await manager.mountWithResult(config)
                                     if case .authenticationFailed = result {
                                         await MainActor.run {
-                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                            withAnimation(.viewTransition) {
                                                 passwordPromptConfig = config
                                             }
                                         }
@@ -228,7 +228,7 @@ struct MountListView: View {
                             .help("Mount")
 
                             Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
+                                withAnimation(.viewTransition) {
                                     editingConfig = config
                                 }
                             } label: {
@@ -401,7 +401,6 @@ struct ConnectionRow<Actions: View>: View {
     }
 }
 
-
 // MARK: - Status Section
 
 struct StatusSection: View {
@@ -431,7 +430,7 @@ struct StatusRow: View {
                 .font(.caption2)
                 .foregroundStyle(ok ? .green : .red)
                 .contentTransition(.symbolEffect(.replace))
-                .animation(.easeInOut(duration: 0.3), value: ok)
+                .animation(.mountTransition, value: ok)
             Text(label)
                 .font(.caption)
         }
