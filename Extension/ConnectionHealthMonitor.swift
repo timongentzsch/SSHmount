@@ -111,7 +111,7 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             self.running = true
-            self.backoffSeconds = 2
+            self.backoffSeconds = 0.5
             self.consecutiveFailures = 0
             self.inflightOperations = 0
             self.lastSuccessfulIOAt = Date()
@@ -219,31 +219,37 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
     }
 
     private func evaluateKeepalive() {
-        guard running, state != .reconnecting, let sendKeepalive = onSendSSHKeepalive else { return }
+        guard running, state != .reconnecting else { return }
 
-        let timeoutMs = Int32((healthTimeoutSeconds * 1000).rounded())
-        let start = Date()
-        let keepaliveOK = sendKeepalive(timeoutMs)
-        let elapsedMs = Date().timeIntervalSince(start) * 1000
-        updateProbeRTT(elapsedMs)
+        let probeTimeoutMs: Int32 = 3_000
 
-        if keepaliveOK {
-            consecutiveFailures = 0
-            state = .connected
-            return
+        // Send SSH keepalive to prevent server-side idle disconnect.
+        // Note: this is fire-and-forget (writes to kernel TCP buffer) and
+        // does NOT reliably detect a dead network path.
+        if let sendKeepalive = onSendSSHKeepalive {
+            _ = sendKeepalive(probeTimeoutMs)
         }
 
-        if self.state == .connected {
-            self.state = .suspect
-        }
-
+        // SFTP probe is the definitive health check — it requires a
+        // round-trip response from the server within the timeout.
         if let sendSFTPProbe = self.onSendSFTPProbe {
-            let sftpProbeOK = sendSFTPProbe(timeoutMs)
+            let start = Date()
+            let sftpProbeOK = sendSFTPProbe(probeTimeoutMs)
+            let elapsedMs = Date().timeIntervalSince(start) * 1000
+            updateProbeRTT(elapsedMs)
+
             if sftpProbeOK {
                 self.consecutiveFailures = 0
                 self.state = .connected
                 return
             }
+        } else {
+            // No SFTP probe available — nothing reliable to check.
+            return
+        }
+
+        if self.state == .connected {
+            self.state = .suspect
         }
 
         if self.shouldSuppressEscalation() {
@@ -260,6 +266,11 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
     }
 
     private func shouldSuppressEscalation() -> Bool {
+        // Only suppress when operations are actually in-flight — load can cause
+        // transient probe timeouts.  An idle connection with a failed probe is
+        // a genuine signal, not noise.
+        guard inflightOperations > 0 else { return false }
+
         if inflightOperations >= busyThreshold {
             return true
         }
@@ -300,7 +311,7 @@ final class ConnectionHealthMonitor: @unchecked Sendable {
         guard running, let reconnect = onReconnectNeeded else { return }
         if reconnect(reason) {
             state = .connected
-            backoffSeconds = 2
+            backoffSeconds = 0.5
             consecutiveFailures = 0
             startKeepaliveTimer()
         } else {
