@@ -10,6 +10,10 @@ settings:
   SWIFT_VERSION: "6.0"
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   CODE_SIGN_IDENTITY: "-"
+  DEAD_CODE_STRIPPING: YES
+  ENABLE_USER_SCRIPT_SANDBOXING: YES
+  ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOL_EXTENSIONS: YES
+  SWIFT_EMIT_LOC_STRINGS: YES
 
 packages:
   swift-argument-parser:
@@ -49,7 +53,9 @@ targets:
       INFOPLIST_FILE: App/Info.plist
       CODE_SIGN_ENTITLEMENTS: App/SSHMount.entitlements
       ENABLE_APP_SANDBOX: NO
-      ENABLE_HARDENED_RUNTIME: true
+      ENABLE_HARDENED_RUNTIME: YES
+      ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOL_EXTENSIONS: YES
+      SWIFT_EMIT_LOC_STRINGS: YES
       LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
     dependencies:
       - target: SSHMountFS
@@ -71,7 +77,10 @@ targets:
       PRODUCT_NAME: SSHMountFS
       INFOPLIST_FILE: Extension/Info.plist
       CODE_SIGN_ENTITLEMENTS: Extension/SSHMountFS.entitlements
-      ENABLE_HARDENED_RUNTIME: true
+      ENABLE_APP_SANDBOX: YES
+      ENABLE_HARDENED_RUNTIME: YES
+      ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOL_EXTENSIONS: YES
+      SWIFT_EMIT_LOC_STRINGS: YES
       HEADER_SEARCH_PATHS: /opt/homebrew/include
       LIBRARY_SEARCH_PATHS: /opt/homebrew/lib
       SWIFT_INCLUDE_PATHS: $(SRCROOT)/CLibSSH2
@@ -91,6 +100,7 @@ targets:
         type: file
     settings:
       PRODUCT_NAME: sshmount
+      SWIFT_EMIT_LOC_STRINGS: YES
       HEADER_SEARCH_PATHS: /opt/homebrew/include
       LIBRARY_SEARCH_PATHS: /opt/homebrew/lib
       SWIFT_INCLUDE_PATHS: $(SRCROOT)/CLibSSH2

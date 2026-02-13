@@ -1,20 +1,27 @@
 import SwiftUI
 
-// MARK: - Color extension for MountStatus
-
 extension MountStatus {
     var color: Color {
         switch self {
-        case .connected: .green
-        case .connecting, .reconnecting: .orange
-        case .unreachable: .yellow
-        case .disconnected: .gray
-        case .error: .red
+        case .connected: return .green
+        case .connecting, .reconnecting: return .orange
+        case .unreachable: return .yellow
+        case .disconnected: return .gray
+        case .error: return .red
+        }
+    }
+    
+    var systemImage: String {
+        switch self {
+        case .connected: return "checkmark.circle.fill"
+        case .connecting: return "arrow.triangle.2.circlepath"
+        case .reconnecting: return "arrow.clockwise"
+        case .unreachable: return "exclamationmark.triangle.fill"
+        case .disconnected: return "circle"
+        case .error: return "xmark.circle.fill"
         }
     }
 }
-
-// MARK: - Main View
 
 struct MountListView: View {
     @ObservedObject var manager: MountManager
@@ -23,22 +30,42 @@ struct MountListView: View {
     @State private var showNewMount = false
     @State private var editingConfig: MountConfig?
     @State private var passwordPromptConfig: MountConfig?
-
+    @State private var searchText = ""
+    @State private var activeSectionExpanded = true
+    @State private var savedSectionExpanded = true
+    
     private var windowWidth: CGFloat {
         if showNewMount || editingConfig != nil {
-            return 560
+            return 520
         }
-        return 320
+        return 340
     }
-
-    /// Saved configs that are NOT currently mounted.
+    
     private var inactiveSavedConfigs: [MountConfig] {
         let activeConfigIDs = Set(manager.mounts.map(\.config.id))
         return manager.savedConfigs.filter { !activeConfigIDs.contains($0.id) }
     }
-
+    
+    private var filteredActiveMounts: [MountEntry] {
+        guard !searchText.isEmpty else { return manager.mounts }
+        return manager.mounts.filter { entry in
+            entry.config.label.localizedCaseInsensitiveContains(searchText) ||
+            entry.config.localPath.localizedCaseInsensitiveContains(searchText) ||
+            entry.config.host.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+    
+    private var filteredInactiveConfigs: [MountConfig] {
+        guard !searchText.isEmpty else { return inactiveSavedConfigs }
+        return inactiveSavedConfigs.filter { config in
+            config.label.localizedCaseInsensitiveContains(searchText) ||
+            config.localPath.localizedCaseInsensitiveContains(searchText) ||
+            config.host.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             if !hasCompletedOnboarding || showOnboarding {
                 OnboardingView(manager: manager, onDismiss: {
                     withAnimation(.viewTransition) {
@@ -85,200 +112,345 @@ struct MountListView: View {
                     .transition(.opacity)
             }
         }
-        .padding(.vertical, 8)
         .frame(width: windowWidth)
         .animation(.viewTransition, value: showOnboarding)
         .animation(.viewTransition, value: showNewMount)
         .animation(.viewTransition, value: editingConfig?.id)
         .animation(.viewTransition, value: passwordPromptConfig?.id)
     }
-
+    
     private var mountList: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // Active header with eject-all
-            HStack {
-                Text("Active")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+        VStack(alignment: .leading, spacing: 0) {
+            searchBar
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            
+            Divider()
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    sectionActive
+                    sectionDivider
+                    sectionSaved
+                }
+            }
+            .frame(maxHeight: 400)
+            
+            Divider()
+            
+            footerView
+        }
+    }
+    
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 13))
+            
+            TextField("Filter connections", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+            
+            if !searchText.isEmpty {
                 Button {
-                    Task { await manager.unmountAll() }
+                    searchText = ""
                 } label: {
-                    Image(systemName: "eject")
-                        .font(.caption)
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Unmount all")
-                .disabled(manager.mounts.isEmpty)
             }
-            .padding(.horizontal)
-
-            if manager.mounts.isEmpty {
-                Text("No active mounts")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal)
-                    .padding(.vertical, 2)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+    
+    @ViewBuilder
+    private var sectionActive: some View {
+        sectionHeader(
+            title: "Active",
+            icon: "bolt.fill",
+            iconColor: .yellow,
+            count: filteredActiveMounts.count,
+            isExpanded: $activeSectionExpanded,
+            trailing: {
+                if !filteredActiveMounts.isEmpty {
+                    Button {
+                        Task { await manager.unmountAll() }
+                    } label: {
+                        Image(systemName: "eject.fill")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Unmount all")
+                }
+            }
+        )
+        
+        if activeSectionExpanded {
+            if filteredActiveMounts.isEmpty {
+                emptyStateView(message: "No active mounts", icon: "externaldrive.badge.minus")
             } else {
-                ForEach(manager.mounts) { entry in
+                ForEach(filteredActiveMounts) { entry in
                     ConnectionRow(
                         label: entry.config.label,
                         subtitle: abbreviateHome(entry.config.localPath),
+                        host: entry.config.host,
                         status: entry.status,
                         connectedSince: entry.connectedSince,
                         retryAttempt: entry.retryAttempt,
                         retryNextAt: entry.retryNextAt,
                         reconnectReason: entry.lastReconnectReason,
                         actions: {
-                            if entry.status == .connected {
-                                Button {
-                                    openInFinder(path: entry.config.localPath)
-                                } label: {
-                                    Image(systemName: "folder")
-                                        .font(.caption2)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Open in Finder")
-
-                                Button {
-                                    openTerminal(at: entry.config.localPath)
-                                } label: {
-                                    Image(systemName: "terminal")
-                                        .font(.caption2)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Open in Terminal")
-                            }
-
-                            Button {
-                                Task { await manager.unmount(entry) }
-                            } label: {
-                                Image(systemName: "eject")
-                                    .font(.caption2)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Unmount")
-
-                            Button {
-                                Task { await manager.unmount(entry, force: true) }
-                            } label: {
-                                Image(systemName: "eject.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.orange)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Force unmount")
+                            connectionActions(for: entry)
                         }
                     )
-                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
-
-            Divider()
-
-            // Saved header with +
-            HStack {
-                Text("Saved")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
+        }
+    }
+    
+    @ViewBuilder
+    private var sectionSaved: some View {
+        sectionHeader(
+            title: "Saved",
+            icon: "bookmark.fill",
+            iconColor: .blue,
+            count: filteredInactiveConfigs.count,
+            isExpanded: $savedSectionExpanded,
+            trailing: {
                 Button {
                     withAnimation(.viewTransition) {
                         showNewMount = true
                     }
                 } label: {
                     Image(systemName: "plus")
-                        .font(.caption)
+                        .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.plain)
-                .help("New connection")
+                .foregroundStyle(.secondary)
+                .help("Add new connection")
             }
-            .padding(.horizontal)
-
-            if inactiveSavedConfigs.isEmpty {
-                Text("No saved connections")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal)
-                    .padding(.vertical, 2)
+        )
+        
+        if savedSectionExpanded {
+            if filteredInactiveConfigs.isEmpty {
+                emptyStateView(
+                    message: searchText.isEmpty ? "No saved connections" : "No matches found",
+                    icon: searchText.isEmpty ? "bookmark" : "magnifyingglass"
+                )
             } else {
-                ForEach(inactiveSavedConfigs) { config in
+                ForEach(filteredInactiveConfigs) { config in
                     ConnectionRow(
                         label: config.label,
                         subtitle: abbreviateHome(config.localPath),
+                        host: config.host,
                         status: .disconnected,
                         connectedSince: nil,
                         actions: {
-                            Button {
-                                Task {
-                                    let result = await manager.mountWithResult(config)
-                                    if case .authenticationFailed = result {
-                                        await MainActor.run {
-                                            withAnimation(.viewTransition) {
-                                                passwordPromptConfig = config
-                                            }
-                                        }
-                                    }
-                                }
-                            } label: {
-                                Image(systemName: "play.fill")
-                                    .font(.caption2)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Mount")
-
-                            Button {
-                                withAnimation(.viewTransition) {
-                                    editingConfig = config
-                                }
-                            } label: {
-                                Image(systemName: "pencil")
-                                    .font(.caption2)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Edit connection")
-
-                            Button {
-                                manager.deleteConfig(config)
-                            } label: {
-                                Image(systemName: "trash")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Remove saved connection")
+                            savedConnectionActions(for: config)
                         }
                     )
                 }
             }
-
-            Divider()
-
-            // Status — clickable to re-open onboarding when any check fails
-            if !manager.permissionStatus.allGood {
-                Button { showOnboarding = true } label: {
-                    StatusSection(status: manager.permissionStatus)
+        }
+    }
+    
+    private var sectionDivider: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(height: 1)
+            .padding(.horizontal, 12)
+    }
+    
+    private func sectionHeader(
+        title: String,
+        icon: String,
+        iconColor: Color,
+        count: Int,
+        isExpanded: Binding<Bool>,
+        @ViewBuilder trailing: () -> some View
+    ) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isExpanded.wrappedValue.toggle()
                 }
-                .buttonStyle(.plain)
-            } else {
-                StatusSection(status: manager.permissionStatus)
-            }
-            Divider()
-
-            HStack {
-                Button("Open SSH Config") {
-                    openSSHConfig()
-                }
-                Spacer()
-                Button("Quit") {
-                    Task {
-                        await manager.unmountAll()
-                        NSApplication.shared.terminate(nil)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 8)
+                    
+                    Image(systemName: icon)
+                        .font(.system(size: 10))
+                        .foregroundStyle(iconColor)
+                    
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .clipShape(Capsule())
                     }
                 }
             }
-            .padding(.horizontal)
+            .buttonStyle(.plain)
+            
+            Spacer()
+            
+            trailing()
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+    
+    private func emptyStateView(message: String, icon: String) -> some View {
+        HStack {
+            Spacer()
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 20))
+                    .foregroundStyle(.tertiary)
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 16)
+            Spacer()
+        }
+    }
+    
+    @ViewBuilder
+    private func connectionActions(for entry: MountEntry) -> some View {
+        if entry.status == .connected {
+            Button {
+                openInFinder(path: entry.config.localPath)
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Open in Finder")
+            
+            Button {
+                openTerminal(at: entry.config.localPath)
+            } label: {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Open in Terminal")
+            
+            Button {
+                Task { await manager.unmount(entry) }
+            } label: {
+                Image(systemName: "eject")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Unmount")
+        }
+    }
+    
+    @ViewBuilder
+    private func savedConnectionActions(for config: MountConfig) -> some View {
+        Button {
+            Task {
+                let result = await manager.mountWithResult(config)
+                if case .authenticationFailed = result {
+                    await MainActor.run {
+                        withAnimation(.viewTransition) {
+                            passwordPromptConfig = config
+                        }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "play.fill")
+                .font(.system(size: 10))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.green)
+        .help("Mount")
+        
+        Button {
+            withAnimation(.viewTransition) {
+                editingConfig = config
+            }
+        } label: {
+            Image(systemName: "pencil")
+                .font(.system(size: 10))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Edit")
+        
+        Button {
+            manager.deleteConfig(config)
+        } label: {
+            Image(systemName: "trash")
+                .font(.system(size: 10))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Delete")
+    }
+    
+    private var footerView: some View {
+        HStack(spacing: 0) {
+            Button {
+                openSSHConfig()
+            } label: {
+                Label("SSH Config", systemImage: "doc.text")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            
+            Spacer()
+            
+            if !manager.permissionStatus.allGood {
+                Button {
+                    showOnboarding = true
+                } label: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
+                .buttonStyle(.plain)
+                .help("Setup issues")
+            }
+            
+            Button {
+                Task {
+                    await manager.unmountAll()
+                    NSApplication.shared.terminate(nil)
+                }
+            } label: {
+                Label("Quit", systemImage: "power")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 }
 
@@ -287,6 +459,7 @@ struct MountListView: View {
 struct ConnectionRow<Actions: View>: View {
     let label: String
     let subtitle: String?
+    let host: String?
     let status: MountStatus
     var connectedSince: Date?
     var retryAttempt: Int = 0
@@ -306,135 +479,71 @@ struct ConnectionRow<Actions: View>: View {
         status != .disconnected
     }
 
+    private var tooltipText: String {
+        var parts: [String] = []
+        if let host = host {
+            parts.append(host)
+        }
+        if let subtitle = subtitle {
+            parts.append(subtitle)
+        }
+        parts.append(status.text)
+        return parts.joined(separator: " • ")
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            // LED dot with glow
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-                .shadow(
-                    color: statusColor.opacity(pulsing ? 0.3 : 0.6),
-                    radius: pulsing ? 2 : 4
-                )
-                .opacity(pulsing ? 0.3 : 1.0)
-                .animation(
-                    shouldPulse
-                        ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-                        : .default,
-                    value: pulsing
-                )
-                .animation(.easeInOut(duration: 0.4), value: status)
-                .onChange(of: shouldPulse) { _, newValue in
-                    pulsing = newValue
-                }
-                .onAppear {
-                    pulsing = shouldPulse
-                }
-
-            VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 10) {
+            Image(systemName: status.systemImage)
+                .font(.system(size: 14))
+                .foregroundStyle(statusColor)
+                .symbolEffect(.pulse, isActive: shouldPulse)
+                .frame(width: 20)
+            
+            VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
-
+                
                 if showStatusText {
-                    HStack(spacing: 0) {
-                        if status == .reconnecting, retryAttempt > 0 {
-                            retryStatusText
-                        } else {
-                            Text(status == .reconnecting
-                                 ? "\(status.text)\(reconnectReason.map { " (\($0))" } ?? "")"
-                                 : status.text)
-                                .foregroundStyle(statusColor)
-
-                            if let subtitle {
-                                Text(" · ")
-                                    .foregroundStyle(.tertiary)
-                                Text(subtitle)
-                                    .foregroundStyle(.secondary)
-                            }
+                    HStack(spacing: 4) {
+                        Text(status.text)
+                            .font(.system(size: 11))
+                            .foregroundStyle(statusColor)
+                        
+                        if let subtitle {
+                            Text("·")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                            Text(subtitle)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
                     }
-                    .font(.caption)
-                    .lineLimit(1)
-
+                    
                     if let connectedSince, status == .connected {
-                        Text(connectedSince, style: .timer)
-                            .font(.caption2)
+                        Text(connectedSince, style: .relative)
+                            .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
-                            .monospacedDigit()
                     }
                 } else if let subtitle {
                     Text(subtitle)
-                        .font(.caption)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
-
+            
             Spacer()
-
+            
             actions()
         }
-        .padding(.horizontal)
-        .padding(.vertical, 4)
-    }
-
-    /// "Retry #N in Xs" with a live countdown.
-    @ViewBuilder
-    private var retryStatusText: some View {
-        if let retryNextAt {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let remaining = max(0, Int(retryNextAt.timeIntervalSince(context.date)))
-                if remaining > 0 {
-                    Text("Retry #\(retryAttempt) in \(remaining)s\(reconnectReason.map { " (\($0))" } ?? "")")
-                        .foregroundStyle(statusColor)
-                        .monospacedDigit()
-                } else {
-                    Text("Retry #\(retryAttempt)...\(reconnectReason.map { " (\($0))" } ?? "")")
-                        .foregroundStyle(statusColor)
-                }
-            }
-        } else {
-            Text("Reconnecting...\(reconnectReason.map { " (\($0))" } ?? "")")
-                .foregroundStyle(statusColor)
-        }
-    }
-}
-
-// MARK: - Status Section
-
-struct StatusSection: View {
-    let status: PermissionStatus
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Setup")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-
-            StatusRow(label: "Installed in /Applications", ok: status.appInstalled)
-            StatusRow(label: "Extension enabled", ok: status.extensionEnabled)
-            StatusRow(label: "SSH keys found", ok: status.sshKeysFound)
-        }
-    }
-}
-
-struct StatusRow: View {
-    let label: String
-    let ok: Bool
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .font(.caption2)
-                .foregroundStyle(ok ? .green : .red)
-                .contentTransition(.symbolEffect(.replace))
-                .animation(.mountTransition, value: ok)
-            Text(label)
-                .font(.caption)
-        }
-        .padding(.horizontal)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .help(tooltipText)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label), \(status.text)")
     }
 }
 

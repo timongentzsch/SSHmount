@@ -3,7 +3,6 @@ import SwiftUI
 struct MountView: View {
     @ObservedObject var manager: MountManager
     var onDismiss: () -> Void
-    /// If set, we're editing an existing saved config.
     var editing: MountConfig?
 
     @State private var hostAlias = ""
@@ -30,6 +29,7 @@ struct MountView: View {
     @State private var errorMessage: String?
     @State private var showPasswordPrompt = false
     @State private var pendingMountConfig: MountConfig?
+    @State private var showAdvanced = false
 
     private var hostAliasIsValid: Bool {
         knownHosts.contains(hostAlias)
@@ -44,43 +44,24 @@ struct MountView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(editing != nil ? "Edit Connection" : "New Mount")
-                .font(.headline)
-
-            VStack(alignment: .leading, spacing: 12) {
-                hostPicker
-                remotePathField
-                mountPointField
-                labelField
-                optionsForm
-                Toggle("Mount on launch", isOn: $mountOnLaunch)
-            }
-
-            if let error = errorMessage {
-                Text(error)
-                    .foregroundStyle(.red)
-                    .font(.caption)
-            }
-
-            HStack {
-                Spacer()
-                Button("Cancel") { onDismiss() }
-                    .keyboardShortcut(.cancelAction)
-
-                if editing != nil {
-                    Button("Save") { doSave() }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(!canSubmit)
-                } else {
-                    Button("Mount") { doMount() }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(!canSubmit)
+        VStack(alignment: .leading, spacing: 0) {
+            headerView
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    basicSection
+                    optionsSection
+                    if showAdvanced {
+                        advancedSection
+                    }
                 }
+                .padding(20)
             }
+            
+            Divider()
+            footerView
         }
-        .padding()
-        .frame(width: 520)
+        .frame(width: 520, height: 540)
         .sheet(isPresented: $showPasswordPrompt) {
             PasswordPromptView(
                 title: "Authentication Failed",
@@ -115,131 +96,297 @@ struct MountView: View {
             loadKnownHosts()
             hydrateFromEditingConfig()
         }
-        .onChange(of: profile) { _, newValue in
-            if newValue == .git {
-                applyGitProfileOverrides()
-            }
-        }
     }
 
-    private var hostPicker: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Host")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    private var headerView: some View {
+        HStack {
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            
+            Spacer()
+            
+            Text(editing != nil ? "Edit Connection" : "New Mount")
+                .font(.system(size: 15, weight: .semibold))
+            
+            Spacer()
+            
+            Button {
+                onDismiss()
+            } label: {
+                Text("Cancel")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
 
-            if knownHosts.isEmpty {
-                Text("No SSH host aliases found in ~/.ssh/config")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                if let knownHostsDiagnostic {
-                    Text(knownHostsDiagnostic)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Picker("Host", selection: $hostAlias) {
-                    ForEach(knownHosts, id: \.self) { host in
-                        Text(host).tag(host)
+    private var basicSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Connection")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            VStack(alignment: .leading, spacing: 6) {
+                if knownHosts.isEmpty {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("No SSH host aliases found")
+                            .font(.system(size: 12))
+                    }
+                    if let knownHostsDiagnostic {
+                        Text(knownHostsDiagnostic)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Menu {
+                        Button("Select a host...") {
+                            hostAlias = ""
+                        }
+                        ForEach(knownHosts, id: \.self) { host in
+                            Button(host) {
+                                hostAlias = host
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text(hostAlias.isEmpty ? "Select a host..." : hostAlias)
+                                .foregroundStyle(hostAlias.isEmpty ? .secondary : .primary)
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                 }
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-        }
-    }
 
-    private var remotePathField: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Remote Path")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField("e.g. ~/project or /var/www", text: $remotePath)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.body, design: .monospaced))
-        }
-    }
-
-    private var mountPointField: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Mount Point")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack(spacing: 4) {
-                Text("~/Volumes/")
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                TextField("folder name (auto)", text: $localPath)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Remote Path")
+                    .font(.system(size: 12, weight: .medium))
+                TextField("e.g. ~/project or /var/www", text: $remotePath)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
             }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Mount Point")
+                    .font(.system(size: 12, weight: .medium))
+                HStack(spacing: 0) {
+                    Text("~/Volumes/")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 10)
+                    TextField("folder name", text: $localPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Label (optional)")
+                    .font(.system(size: 12, weight: .medium))
+                TextField("Friendly name", text: $label)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            Toggle(isOn: $mountOnLaunch) {
+                Label("Mount on app launch", systemImage: "power")
+                    .font(.system(size: 13))
+            }
+            .toggleStyle(.switch)
         }
     }
 
-    private var labelField: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Label")
-                .font(.caption)
+    private var optionsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Options")
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            TextField("Optional", text: $label)
-                .textFieldStyle(.roundedBorder)
-        }
-    }
+                .textCase(.uppercase)
 
-    private var optionsForm: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Connection Options")
-                .font(.caption)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Profile")
+                        .font(.system(size: 13))
+                    Spacer()
+                    Picker("", selection: $profile) {
+                        Text("Standard").tag(MountProfile.standard)
+                        Text("Git-safe").tag(MountProfile.git)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 160)
+                }
+                
+                if profile == .git {
+                    Text("Git profile enforces blocking I/O, single workers, and disabled caches for better compatibility.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Button {
+                withAnimation {
+                    showAdvanced.toggle()
+                }
+            } label: {
+                HStack {
+                    Image(systemName: showAdvanced ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Advanced Options")
+                        .font(.system(size: 13))
+                }
                 .foregroundStyle(.secondary)
-
-            Picker("Profile", selection: $profile) {
-                Text("Standard").tag(MountProfile.standard)
-                Text("Git-safe").tag(MountProfile.git)
             }
-            .pickerStyle(.segmented)
-
-            if profile == .git {
-                Text("Git profile enforces blocking I/O, single workers, and disabled caches.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack {
-                Stepper("Read workers: \(readWorkers)", value: $readWorkers, in: 1...8)
-                    .disabled(profile == .git)
-                Stepper("Write workers: \(writeWorkers)", value: $writeWorkers, in: 1...8)
-                    .disabled(profile == .git)
-            }
-            Picker("I/O mode", selection: $ioMode) {
-                Text("Blocking").tag(MountIOMode.blocking)
-                Text("Nonblocking").tag(MountIOMode.nonblocking)
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .disabled(profile == .git)
-
-            HStack {
-                Stepper("Health interval: \(healthInterval)s", value: $healthInterval, in: 1...300)
-                Stepper("Health timeout: \(healthTimeout)s", value: $healthTimeout, in: 1...120)
-            }
-            HStack {
-                Stepper("Health failures: \(healthFailures)", value: $healthFailures, in: 1...12)
-                Stepper("Busy threshold: \(busyThreshold)", value: $busyThreshold, in: 1...4096)
-            }
-            HStack {
-                Stepper("Grace: \(graceSeconds)s", value: $graceSeconds, in: 0...300)
-                Stepper("Queue timeout: \(queueTimeoutMs)ms", value: $queueTimeoutMs, in: 100...60_000, step: 100)
-            }
-            HStack {
-                Stepper("Attr cache: \(cacheAttrSeconds)s", value: $cacheAttrSeconds, in: 0...300)
-                    .disabled(profile == .git)
-                Stepper("Dir cache: \(cacheDirSeconds)s", value: $cacheDirSeconds, in: 0...300)
-                    .disabled(profile == .git)
-            }
+            .buttonStyle(.plain)
         }
     }
 
-    /// Build the full local path from the folder name input.
+    private var advancedSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Group {
+                HStack {
+                    Text("Read workers")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Stepper("\(readWorkers)", value: $readWorkers, in: 1...8)
+                        .disabled(profile == .git)
+                }
+                
+                HStack {
+                    Text("Write workers")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Stepper("\(writeWorkers)", value: $writeWorkers, in: 1...8)
+                        .disabled(profile == .git)
+                }
+                
+                HStack {
+                    Text("I/O Mode")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Picker("", selection: $ioMode) {
+                        Text("Blocking").tag(MountIOMode.blocking)
+                        Text("Nonblocking").tag(MountIOMode.nonblocking)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 120)
+                    .disabled(profile == .git)
+                }
+            }
+
+            Divider()
+
+            Group {
+                HStack {
+                    Text("Health interval")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Stepper("\(healthInterval)s", value: $healthInterval, in: 1...300)
+                }
+                
+                HStack {
+                    Text("Health timeout")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Stepper("\(healthTimeout)s", value: $healthTimeout, in: 1...120)
+                }
+                
+                HStack {
+                    Text("Health failures")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Stepper("\(healthFailures)", value: $healthFailures, in: 1...12)
+                }
+            }
+
+            Divider()
+
+            Group {
+                HStack {
+                    Text("Attr cache")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Stepper("\(cacheAttrSeconds)s", value: $cacheAttrSeconds, in: 0...300)
+                        .disabled(profile == .git)
+                }
+                
+                HStack {
+                    Text("Dir cache")
+                        .font(.system(size: 12))
+                    Spacer()
+                    Stepper("\(cacheDirSeconds)s", value: $cacheDirSeconds, in: 0...300)
+                        .disabled(profile == .git)
+                }
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var footerView: some View {
+        VStack(spacing: 8) {
+            if let error = errorMessage {
+                HStack {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                }
+            }
+            
+            HStack {
+                Spacer()
+                
+                Button {
+                    onDismiss()
+                } label: {
+                    Text("Cancel")
+                        .frame(width: 80)
+                }
+                .buttonStyle(.bordered)
+                
+                if editing != nil {
+                    Button {
+                        doSave()
+                    } label: {
+                        Text("Save")
+                            .frame(width: 80)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmit)
+                } else {
+                    Button {
+                        doMount()
+                    } label: {
+                        Text("Mount")
+                            .frame(width: 80)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmit)
+                }
+            }
+        }
+        .padding(16)
+    }
+
     private var resolvedLocalPath: String {
         localPath.isEmpty ? "" : "~/Volumes/\(localPath)"
     }
@@ -249,7 +396,6 @@ struct MountView: View {
             hostAlias = config.hostAlias
             remotePath = config.remotePath
 
-            // Strip ~/Volumes/ prefix to show just the folder name
             let home = PathUtilities.realHomeDirectory
             let prefix = home + "/Volumes/"
             if config.localPath.hasPrefix(prefix) {
@@ -276,7 +422,6 @@ struct MountView: View {
             cacheDirSeconds = Int(opts.dirCacheTimeout.rounded())
         }
 
-        // Warn if the saved alias no longer exists, then fall back to the first known host.
         if !hostAlias.isEmpty && !knownHosts.contains(hostAlias) {
             errorMessage = "Saved host alias '\(hostAlias)' is no longer defined in ~/.ssh/config."
         }
@@ -308,9 +453,9 @@ struct MountView: View {
         if !FileManager.default.fileExists(atPath: configPath) {
             knownHostsDiagnostic = "Config file not found at \(configPath)."
         } else if !FileManager.default.isReadableFile(atPath: configPath) {
-            knownHostsDiagnostic = "Config exists but is not readable at \(configPath)."
+            knownHostsDiagnostic = "Config exists but is not readable."
         } else {
-            knownHostsDiagnostic = "Config is readable, but contains no concrete Host aliases."
+            knownHostsDiagnostic = "No concrete Host aliases found."
         }
     }
 
@@ -343,8 +488,6 @@ struct MountView: View {
         )
     }
 
-    /// Build a MountConfig from the current form state.
-    /// Reuses the existing config's ID when editing.
     private func buildConfig() throws -> MountConfig {
         try validateInputs()
         return MountConfig(
