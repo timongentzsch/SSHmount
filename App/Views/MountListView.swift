@@ -41,27 +41,22 @@ struct MountListView: View {
         return 340
     }
     
-    private var inactiveSavedConfigs: [MountConfig] {
-        let activeConfigIDs = Set(manager.mounts.map(\.config.id))
-        return manager.savedConfigs.filter { !activeConfigIDs.contains($0.id) }
+    private func matchesSearch(_ config: MountConfig) -> Bool {
+        config.label.localizedCaseInsensitiveContains(searchText) ||
+        config.localPath.localizedCaseInsensitiveContains(searchText) ||
+        config.host.localizedCaseInsensitiveContains(searchText)
     }
-    
+
     private var filteredActiveMounts: [MountEntry] {
         guard !searchText.isEmpty else { return manager.mounts }
-        return manager.mounts.filter { entry in
-            entry.config.label.localizedCaseInsensitiveContains(searchText) ||
-            entry.config.localPath.localizedCaseInsensitiveContains(searchText) ||
-            entry.config.host.localizedCaseInsensitiveContains(searchText)
-        }
+        return manager.mounts.filter { matchesSearch($0.config) }
     }
-    
+
     private var filteredInactiveConfigs: [MountConfig] {
-        guard !searchText.isEmpty else { return inactiveSavedConfigs }
-        return inactiveSavedConfigs.filter { config in
-            config.label.localizedCaseInsensitiveContains(searchText) ||
-            config.localPath.localizedCaseInsensitiveContains(searchText) ||
-            config.host.localizedCaseInsensitiveContains(searchText)
-        }
+        let activeConfigIDs = Set(manager.mounts.map(\.config.id))
+        let inactive = manager.savedConfigs.filter { !activeConfigIDs.contains($0.id) }
+        guard !searchText.isEmpty else { return inactive }
+        return inactive.filter { matchesSearch($0) }
     }
     
     var body: some View {
@@ -203,9 +198,6 @@ struct MountListView: View {
                         host: entry.config.host,
                         status: entry.status,
                         connectedSince: entry.connectedSince,
-                        retryAttempt: entry.retryAttempt,
-                        retryNextAt: entry.retryNextAt,
-                        reconnectReason: entry.lastReconnectReason,
                         actions: {
                             connectionActions(for: entry)
                         }
@@ -217,11 +209,12 @@ struct MountListView: View {
     
     @ViewBuilder
     private var sectionSaved: some View {
+        let configs = filteredInactiveConfigs
         sectionHeader(
             title: "Saved",
             icon: "bookmark.fill",
             iconColor: .blue,
-            count: filteredInactiveConfigs.count,
+            count: configs.count,
             isExpanded: $savedSectionExpanded,
             trailing: {
                 Button {
@@ -237,15 +230,15 @@ struct MountListView: View {
                 .help("Add new connection")
             }
         )
-        
+
         if savedSectionExpanded {
-            if filteredInactiveConfigs.isEmpty {
+            if configs.isEmpty {
                 emptyStateView(
                     message: searchText.isEmpty ? "No saved connections" : "No matches found",
                     icon: searchText.isEmpty ? "bookmark" : "magnifyingglass"
                 )
             } else {
-                ForEach(filteredInactiveConfigs) { config in
+                ForEach(configs) { config in
                     ConnectionRow(
                         label: config.label,
                         subtitle: abbreviateHome(config.localPath),
@@ -374,10 +367,8 @@ struct MountListView: View {
             Task {
                 let result = await manager.mountWithResult(config)
                 if case .authenticationFailed = result {
-                    await MainActor.run {
-                        withAnimation(.viewTransition) {
-                            passwordPromptConfig = config
-                        }
+                    withAnimation(.viewTransition) {
+                        passwordPromptConfig = config
                     }
                 }
             }
@@ -462,14 +453,7 @@ struct ConnectionRow<Actions: View>: View {
     let host: String?
     let status: MountStatus
     var connectedSince: Date?
-    var retryAttempt: Int = 0
-    var retryNextAt: Date?
-    var reconnectReason: String? = nil
     @ViewBuilder let actions: () -> Actions
-
-    @State private var pulsing = false
-
-    private var statusColor: Color { status.color }
 
     private var shouldPulse: Bool {
         status == .unreachable || status == .reconnecting || status == .connecting
@@ -495,7 +479,7 @@ struct ConnectionRow<Actions: View>: View {
         HStack(spacing: 10) {
             Image(systemName: status.systemImage)
                 .font(.system(size: 14))
-                .foregroundStyle(statusColor)
+                .foregroundStyle(status.color)
                 .symbolEffect(.pulse, isActive: shouldPulse)
                 .frame(width: 20)
             
@@ -508,7 +492,7 @@ struct ConnectionRow<Actions: View>: View {
                     HStack(spacing: 4) {
                         Text(status.text)
                             .font(.system(size: 11))
-                            .foregroundStyle(statusColor)
+                            .foregroundStyle(status.color)
                         
                         if let subtitle {
                             Text("·")
@@ -559,6 +543,7 @@ private func openTerminal(at path: String) {
             set targetPath to item 1 of argv
             tell application "Terminal"
                 do script "cd " & quoted form of targetPath & "; clear"
+                activate
             end tell
         end run
         """
@@ -566,12 +551,6 @@ private func openTerminal(at path: String) {
     process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     process.arguments = ["-e", script, path]
     try? process.run()
-
-    Task { @MainActor in
-        try? await Task.sleep(for: .milliseconds(500))
-        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal")
-            .first?.activate()
-    }
 }
 
 /// Open a single Finder window for the given path.
@@ -594,10 +573,7 @@ private func openSSHConfig() {
     let workspace = NSWorkspace.shared
     let fileURL = URL(fileURLWithPath: configPath)
 
-    if !fileManager.fileExists(atPath: configDirectory) {
-        try? fileManager.createDirectory(atPath: configDirectory, withIntermediateDirectories: true)
-    }
-
+    try? fileManager.createDirectory(atPath: configDirectory, withIntermediateDirectories: true)
     if !fileManager.fileExists(atPath: configPath) {
         try? "".write(toFile: configPath, atomically: true, encoding: .utf8)
     }

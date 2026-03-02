@@ -69,13 +69,6 @@ enum MountStatus: Sendable, Equatable {
     case unreachable
     case error(String)
 
-    var isActive: Bool {
-        switch self {
-        case .connected, .reconnecting, .unreachable: true
-        default: false
-        }
-    }
-
     var text: String {
         switch self {
         case .disconnected: "Disconnected"

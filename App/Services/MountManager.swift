@@ -27,6 +27,16 @@ enum AggregateConnectionStatus {
         case .mixed:        "externaldrive.connected.to.line.below"
         }
     }
+
+    var color: Color {
+        switch self {
+        case .noMounts:     .secondary
+        case .allConnected: .green
+        case .degraded:     .orange
+        case .hasErrors:    .red
+        case .mixed:        .blue
+        }
+    }
 }
 
 // MARK: - Mount Manager
@@ -54,12 +64,18 @@ final class MountManager: ObservableObject {
     var aggregateStatus: AggregateConnectionStatus {
         guard !mounts.isEmpty else { return .noMounts }
 
-        let statuses = mounts.map { entry in
-            Self.aggregateStatusEquivalent(for: entry.status)
+        var hasError = false
+        var allConnected = true
+        var hasDegraded = false
+        for entry in mounts {
+            let status = Self.aggregateStatusEquivalent(for: entry.status)
+            switch status {
+            case .error: hasError = true; allConnected = false
+            case .unreachable, .reconnecting: hasDegraded = true; allConnected = false
+            case .connected: break
+            default: allConnected = false
+            }
         }
-        let hasError = statuses.contains { if case .error = $0 { return true }; return false }
-        let allConnected = statuses.allSatisfy { $0 == .connected }
-        let hasDegraded = statuses.contains { $0 == .unreachable || $0 == .reconnecting }
 
         if hasError { return .hasErrors }
         if allConnected { return .allConnected }
@@ -290,10 +306,13 @@ final class MountManager: ObservableObject {
         observingExtensionState = true
     }
 
-    /// Apply extension-reported state to all active mounts.
+    /// Apply extension-reported state to all tracked mounts.
+    ///
+    /// Applies to every mount except `.connecting` (in-progress mount requests).
+    /// This ensures Darwin notifications can unstick any state, including `.error`.
     private func applyExtensionState(_ status: MountStatus) {
         withAnimation(.mountTransition) {
-            for i in mounts.indices where mounts[i].status.isActive {
+            for i in mounts.indices where mounts[i].status != .connecting {
                 if status == .connected && mounts[i].status != .connected {
                     mounts[i].connectedSince = Date()
                     mounts[i].retryAttempt = 0
@@ -369,44 +388,62 @@ final class MountManager: ObservableObject {
 
     // MARK: - Mount Table Polling
 
+    /// True when any tracked mount is not in a healthy terminal state.
+    private var hasUnhealthyMounts: Bool {
+        mounts.contains { $0.status != .connected && $0.status != .connecting }
+    }
+
     private func startMountTablePolling() {
         pollTask = Task { [weak self] in
+            var ticksSincePermissionCheck = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30))
+                // Poll faster (5s) when something is wrong, normal (30s) when all good.
+                let interval: TimeInterval = await self?.hasUnhealthyMounts == true ? 5 : 30
+                try? await Task.sleep(for: .seconds(interval))
                 guard !Task.isCancelled else { break }
                 await self?.reconcileMountTable()
-                await self?.refreshPermissions()
+                // Permission status rarely changes; check every ~5 minutes.
+                ticksSincePermissionCheck += 1
+                let permissionInterval = interval < 10 ? 60 : 10 // ~5min at 5s, ~5min at 30s
+                if ticksSincePermissionCheck >= permissionInterval {
+                    ticksSincePermissionCheck = 0
+                    await self?.refreshPermissions()
+                }
             }
         }
     }
 
     /// Reconcile tracked mounts with the kernel mount table.
-    /// Adds/removes entries and heals stale unreachable state when mount is present.
+    ///
+    /// Three passes:
+    /// 1. **Remove** tracked mounts that no longer exist in the kernel (any state except `.connecting`).
+    /// 2. **Heal** tracked mounts in stale state (error/unreachable/reconnecting) back to `.connected`
+    ///    when the kernel mount table confirms they exist.
+    /// 3. **Discover** externally-created mounts (e.g. from CLI).
     private func reconcileMountTable() async {
         let systemMounts = await ExtensionBridge.shared.activeMounts()
         let systemPaths = Set(systemMounts.map(\.localPath))
 
-        // Remove entries whose kernel mount has disappeared.
-        let disappeared = mounts.filter { !systemPaths.contains($0.config.localPath) && $0.status.isActive }
-        if !disappeared.isEmpty {
-            for entry in disappeared {
-                Log.app.notice("Mount disappeared: \(entry.config.localPath, privacy: .public)")
+        // 1. Remove tracked mounts gone from kernel (skip in-progress mounts).
+        let gone = mounts.filter { $0.status != .connecting && !systemPaths.contains($0.config.localPath) }
+        if !gone.isEmpty {
+            for entry in gone {
+                Log.app.notice("Mount gone from kernel: \(entry.config.localPath, privacy: .public) (was \(entry.status.text, privacy: .public))")
             }
             withAnimation(.mountTransition) {
-                mounts.removeAll { !systemPaths.contains($0.config.localPath) && $0.status != .connecting }
+                mounts.removeAll { $0.status != .connecting && !systemPaths.contains($0.config.localPath) }
             }
         }
 
-        // Optimistically heal stale unreachable state when mount still exists.
-        let promoteIndices = mounts.indices.filter {
-            self.mounts[$0].status == .unreachable && systemPaths.contains(self.mounts[$0].config.localPath)
+        // 2. Heal any stale state → .connected when kernel confirms mount exists.
+        let staleIndices = mounts.indices.filter {
+            let s = self.mounts[$0].status
+            return s != .connecting && s != .connected && systemPaths.contains(self.mounts[$0].config.localPath)
         }
-        if !promoteIndices.isEmpty {
-            for idx in promoteIndices {
-                Log.app.notice("Promoting stale unreachable -> connected for \(self.mounts[idx].config.localPath, privacy: .public) (mount table present)")
-            }
+        if !staleIndices.isEmpty {
             withAnimation(.mountTransition) {
-                for idx in promoteIndices {
+                for idx in staleIndices {
+                    Log.app.notice("Healing \(self.mounts[idx].status.text, privacy: .public) → connected: \(self.mounts[idx].config.localPath, privacy: .public)")
                     self.mounts[idx].status = .connected
                     if self.mounts[idx].connectedSince == nil {
                         self.mounts[idx].connectedSince = Date()
@@ -418,10 +455,10 @@ final class MountManager: ObservableObject {
             }
         }
 
-        // Pick up externally-created mounts (e.g. from CLI).
+        // 3. Pick up externally-created mounts (e.g. from CLI).
+        let trackedPaths = Set(mounts.map(\.config.localPath))
         for mount in systemMounts {
-            let alreadyTracked = mounts.contains { $0.config.localPath == mount.localPath }
-            if !alreadyTracked {
+            if !trackedPaths.contains(mount.localPath) {
                 let matchedConfig = savedConfigs.first { config in
                     if config.localPath.isEmpty {
                         return config.hostAlias == (mount.remote.host ?? "")

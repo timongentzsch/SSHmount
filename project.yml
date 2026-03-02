@@ -9,7 +9,9 @@ options:
 settings:
   SWIFT_VERSION: "6.0"
   MACOSX_DEPLOYMENT_TARGET: "26.0"
-  CODE_SIGN_IDENTITY: "-"
+  CODE_SIGN_IDENTITY: "Apple Development"
+  CODE_SIGN_STYLE: Automatic
+  DEVELOPMENT_TEAM: R9G43NZ9J2
   DEAD_CODE_STRIPPING: YES
   ENABLE_USER_SCRIPT_SANDBOXING: YES
   ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOL_EXTENSIONS: YES
@@ -84,7 +86,11 @@ targets:
       HEADER_SEARCH_PATHS: /opt/homebrew/include
       LIBRARY_SEARCH_PATHS: /opt/homebrew/lib
       SWIFT_INCLUDE_PATHS: $(SRCROOT)/CLibSSH2
-      OTHER_LDFLAGS: -lssh2
+      OTHER_LDFLAGS: >-
+        /opt/homebrew/opt/libssh2/lib/libssh2.a
+        /opt/homebrew/opt/openssl@3/lib/libssl.a
+        /opt/homebrew/opt/openssl@3/lib/libcrypto.a
+        -lz
     frameworks:
       - FSKit
     dependencies: []

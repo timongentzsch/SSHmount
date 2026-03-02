@@ -71,16 +71,15 @@ struct MountView: View {
                     showPasswordPrompt = false
                     if let config = pendingMountConfig {
                         Task {
-                            let result = await manager.mountWithResult(config, sessionPassword: password)
-                            await MainActor.run {
-                                switch result {
-                                case .success:
-                                    onDismiss()
-                                case .authenticationFailed:
-                                    errorMessage = "Authentication failed even with password"
-                                case .otherError(let message):
-                                    errorMessage = message
-                                }
+                            let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let result = await manager.mountWithResult(config, sessionPassword: trimmed.isEmpty ? nil : trimmed)
+                            switch result {
+                            case .success:
+                                onDismiss()
+                            case .authenticationFailed:
+                                errorMessage = "Authentication failed even with password"
+                            case .otherError(let message):
+                                errorMessage = message
                             }
                         }
                     }
@@ -96,6 +95,11 @@ struct MountView: View {
             loadKnownHosts()
             hydrateFromEditingConfig()
         }
+        .onChange(of: profile) { _, newProfile in
+            if newProfile == .git {
+                applyGitProfileOverrides()
+            }
+        }
     }
 
     private var headerView: some View {
@@ -108,22 +112,18 @@ struct MountView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            
+
             Spacer()
-            
+
             Text(editing != nil ? "Edit Connection" : "New Mount")
                 .font(.system(size: 15, weight: .semibold))
-            
+
             Spacer()
-            
-            Button {
-                onDismiss()
-            } label: {
-                Text("Cancel")
-                    .font(.system(size: 13))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+
+            // Spacer-balancing placeholder to keep the title centered
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 18))
+                .hidden()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -508,16 +508,14 @@ struct MountView: View {
 
             Task {
                 let result = await manager.mountWithResult(config, sessionPassword: nil)
-                await MainActor.run {
-                    switch result {
-                    case .success:
-                        onDismiss()
-                    case .authenticationFailed:
-                        pendingMountConfig = config
-                        showPasswordPrompt = true
-                    case .otherError(let message):
-                        errorMessage = message
-                    }
+                switch result {
+                case .success:
+                    onDismiss()
+                case .authenticationFailed:
+                    pendingMountConfig = config
+                    showPasswordPrompt = true
+                case .otherError(let message):
+                    errorMessage = message
                 }
             }
         } catch {
