@@ -1,46 +1,5 @@
 import SwiftUI
 
-// MARK: - Shared Animation Constants
-
-extension Animation {
-    /// Standard transition for mount state changes (connect/disconnect/error).
-    static let mountTransition = Animation.easeInOut(duration: 0.3)
-    /// Quick transition for UI panel swaps (show/hide views).
-    static let viewTransition = Animation.easeInOut(duration: 0.2)
-}
-
-// MARK: - Aggregate Connection Status
-
-enum AggregateConnectionStatus {
-    case noMounts
-    case allConnected
-    case degraded       // some unreachable or reconnecting
-    case hasErrors
-    case mixed          // connected + other states
-
-    var iconName: String {
-        switch self {
-        case .noMounts:     "externaldrive.badge.minus"
-        case .allConnected: "externaldrive.connected.to.line.below.fill"
-        case .degraded:     "externaldrive.badge.exclamationmark"
-        case .hasErrors:    "externaldrive.badge.xmark"
-        case .mixed:        "externaldrive.connected.to.line.below"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .noMounts:     .secondary
-        case .allConnected: SSHMountTheme.success
-        case .degraded:     SSHMountTheme.warning
-        case .hasErrors:    SSHMountTheme.danger
-        case .mixed:        .blue
-        }
-    }
-}
-
-// MARK: - Mount Manager
-
 /// Manages all mount state and coordinates with the FSKit extension.
 ///
 /// Two inputs:
@@ -223,12 +182,10 @@ final class MountManager: ObservableObject {
 
     // MARK: - Auth Error Detection
 
-    /// Classify whether an error indicates authentication failure using typed error matching.
     private static func isAuthenticationError(_ error: Error) -> Bool {
         if let mountError = error as? MountError {
             if case .authFailed = mountError { return true }
         }
-        // Fallback: string matching for errors from mount stderr
         let msg = error.localizedDescription.lowercased()
         return msg.contains("authentication failed") ||
                msg.contains("auth failed") ||
@@ -236,7 +193,6 @@ final class MountManager: ObservableObject {
                msg.contains("permission denied")
     }
 
-    /// Map low-level unmount errors to concise user-facing text in the menu UI.
     private static func userFacingUnmountError(_ error: Error, force: Bool) -> String {
         let detail = error.localizedDescription
         if MountError.isBusyUnmountMessage(detail) {
@@ -249,7 +205,6 @@ final class MountManager: ObservableObject {
 
     // MARK: - Extension State Listeners
 
-    /// Listen for Darwin notifications from the extension.
     private func startExtensionStateListeners() {
         guard let center = CFNotificationCenterGetDarwinNotifyCenter() else { return }
         let observer = Unmanaged.passUnretained(self).toOpaque()
@@ -312,10 +267,6 @@ final class MountManager: ObservableObject {
         )
     }
 
-    /// Apply extension-reported state to all tracked mounts.
-    ///
-    /// Applies to every mount except `.connecting` (in-progress mount requests).
-    /// This ensures Darwin notifications can unstick any state, including `.error`.
     private func applyExtensionState(_ status: MountStatus) {
         let now = Date()
         updateMounts(matching: { $0.status != .connecting }) { entry in
@@ -340,7 +291,6 @@ final class MountManager: ObservableObject {
         }
     }
 
-    /// Extension scheduled a reconnect attempt in `delay` seconds.
     private func applyRetryScheduled(delay: Double) {
         let nextRetryAt = Date().addingTimeInterval(delay)
         updateMounts(matching: { $0.status == .reconnecting }) { entry in
@@ -386,7 +336,6 @@ final class MountManager: ObservableObject {
 
     // MARK: - Mount Table Polling
 
-    /// True when any tracked mount is not in a healthy terminal state.
     private var hasUnhealthyMounts: Bool {
         mounts.contains { $0.status != .connected && $0.status != .connecting }
     }
@@ -412,13 +361,6 @@ final class MountManager: ObservableObject {
         }
     }
 
-    /// Reconcile tracked mounts with the kernel mount table.
-    ///
-    /// Three passes:
-    /// 1. **Remove** tracked mounts that no longer exist in the kernel (any state except `.connecting`).
-    /// 2. **Heal** tracked mounts in stale state (error/unreachable/reconnecting) back to `.connected`
-    ///    when the kernel mount table confirms they exist.
-    /// 3. **Discover** externally-created mounts (e.g. from CLI).
     private func reconcileMountTable() async {
         let systemMounts = await ExtensionBridge.shared.activeMounts()
         let snapshot = MountTableSnapshot(systemMounts: systemMounts)
@@ -649,25 +591,4 @@ final class MountManager: ObservableObject {
             entry.connectedSince = nil
         }
     }
-}
-
-/// A live mount: config + runtime status.
-struct MountEntry: Identifiable {
-    let id = UUID()
-    var config: MountConfig
-    var status: MountStatus
-    var connectedSince: Date?
-    var retryAttempt: Int = 0
-    var retryNextAt: Date?
-    var lastReconnectReason: String?
-}
-
-/// Status of required permissions and setup.
-struct PermissionStatus {
-    var appInstalled = false
-    var extensionRegistered = false
-    var extensionEnabled = false
-    var sshKeysFound = false
-
-    var allGood: Bool { appInstalled && extensionRegistered && extensionEnabled && sshKeysFound }
 }

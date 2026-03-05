@@ -1,6 +1,24 @@
 import SwiftUI
 
+private struct MountViewContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct MountViewViewportHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct MountView: View {
+    private static let defaultOptions = MountOptions.defaultStandard
+
     @ObservedObject var manager: MountManager
     var onDismiss: () -> Void
     var editing: MountConfig?
@@ -11,18 +29,18 @@ struct MountView: View {
     @State private var label = ""
     @State private var mountOnLaunch = false
 
-    @State private var profile: MountProfile = .standard
-    @State private var readWorkers = 1
-    @State private var writeWorkers = 1
-    @State private var ioMode: MountIOMode = .blocking
-    @State private var healthInterval = 5
-    @State private var healthTimeout = 10
-    @State private var healthFailures = 5
-    @State private var busyThreshold = 32
-    @State private var graceSeconds = 20
-    @State private var queueTimeoutMs = 2_000
-    @State private var cacheAttrSeconds = 5
-    @State private var cacheDirSeconds = 5
+    @State private var profile = Self.defaultOptions.profile
+    @State private var readWorkers = Self.defaultOptions.readWorkers
+    @State private var writeWorkers = Self.defaultOptions.writeWorkers
+    @State private var ioMode = Self.defaultOptions.ioMode
+    @State private var healthInterval = Int(Self.defaultOptions.healthInterval)
+    @State private var healthTimeout = Int(Self.defaultOptions.healthTimeout)
+    @State private var healthFailures = Self.defaultOptions.healthFailures
+    @State private var busyThreshold = Self.defaultOptions.busyThreshold
+    @State private var graceSeconds = Int(Self.defaultOptions.graceSeconds)
+    @State private var queueTimeoutMs = Self.defaultOptions.queueTimeoutMs
+    @State private var cacheAttrSeconds = Int(Self.defaultOptions.cacheTimeout)
+    @State private var cacheDirSeconds = Int(Self.defaultOptions.dirCacheTimeout)
 
     @State private var knownHosts: [String] = []
     @State private var knownHostsDiagnostic: String?
@@ -30,6 +48,8 @@ struct MountView: View {
     @State private var showPasswordPrompt = false
     @State private var pendingMountConfig: MountConfig?
     @State private var showAdvanced = false
+    @State private var contentHeight: CGFloat = 0
+    @State private var viewportHeight: CGFloat = 0
 
     private var hostAliasIsValid: Bool {
         knownHosts.contains(hostAlias)
@@ -43,25 +63,54 @@ struct MountView: View {
         PathUtilities.realHomeDirectory + "/.ssh/config"
     }
 
+    private var showsScrollHint: Bool {
+        contentHeight > viewportHeight + 24
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             headerView
-            Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 10) {
                     basicSection
                     optionsSection
                     if showAdvanced {
                         advancedSection
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, SSHMountTheme.outerPadding)
+                .padding(.vertical, 10)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear
+                            .preference(key: MountViewContentHeightKey.self, value: proxy.size.height)
+                    }
+                )
             }
-            
-            Divider()
+            .scrollIndicators(.visible)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: MountViewViewportHeightKey.self, value: proxy.size.height)
+                }
+            )
+            .overlay(alignment: .bottomTrailing) {
+                if showsScrollHint {
+                    Label("Scroll", systemImage: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.trailing, SSHMountTheme.outerPadding)
+                        .padding(.bottom, 8)
+                }
+            }
+
             footerView
         }
-        .frame(width: 520, height: 540)
+        .frame(width: 500, height: 500)
+        .background(.clear)
         .sheet(isPresented: $showPasswordPrompt) {
             PasswordPromptView(
                 title: "Authentication Failed",
@@ -100,49 +149,41 @@ struct MountView: View {
                 applyGitProfileOverrides()
             }
         }
+        .onPreferenceChange(MountViewContentHeightKey.self) { contentHeight = $0 }
+        .onPreferenceChange(MountViewViewportHeightKey.self) { viewportHeight = $0 }
     }
 
     private var headerView: some View {
         HStack {
-            Button {
-                onDismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-
-            Spacer()
-
             Text(editing != nil ? "Edit Connection" : "New Mount")
                 .font(.system(size: 15, weight: .semibold))
 
             Spacer()
 
-            // Spacer-balancing placeholder to keep the title centered
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 18))
-                .hidden()
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+            }
+            .buttonStyle(SSHMountIconButtonStyle(layout: .square))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, SSHMountTheme.outerPadding)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
     }
 
     private var basicSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Connection")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
+        VStack(alignment: .leading, spacing: 10) {
+            SSHMountSectionTitle(title: "Connection")
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 if knownHosts.isEmpty {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(SSHMountTheme.warning)
                         Text("No SSH host aliases found")
-                            .font(.system(size: 12))
+                            .font(.system(size: 12, weight: .semibold))
                     }
                     if let knownHostsDiagnostic {
                         Text(knownHostsDiagnostic)
@@ -163,78 +204,78 @@ struct MountView: View {
                         HStack {
                             Text(hostAlias.isEmpty ? "Select a host..." : hostAlias)
                                 .foregroundStyle(hostAlias.isEmpty ? .secondary : .primary)
+                                .font(.system(size: 13, design: .monospaced))
                             Spacer()
                             Image(systemName: "chevron.down")
-                                .font(.system(size: 10))
+                                .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .padding(.horizontal, SSHMountTheme.innerPadding)
+                        .frame(minHeight: SSHMountTheme.controlHeight)
+                        .sshMountSurface()
                     }
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Remote Path")
-                    .font(.system(size: 12, weight: .medium))
-                TextField("e.g. ~/project or /var/www", text: $remotePath)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
-            }
+            VStack(alignment: .leading, spacing: 8) {
+                formField(title: "Remote Path") {
+                    TextField("e.g. ~/project or /var/www", text: $remotePath)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13, design: .monospaced))
+                }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Mount Point")
-                    .font(.system(size: 12, weight: .medium))
-                HStack(spacing: 0) {
-                    Text("~/Volumes/")
-                        .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 10)
-                    TextField("folder name", text: $localPath)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced))
+                formField(title: "Mount Point") {
+                    HStack(spacing: 0) {
+                        Text("~/Volumes/")
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 2)
+                        TextField("folder name", text: $localPath)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13, design: .monospaced))
+                    }
+                }
+
+                formField(title: "Label", detail: "Optional Finder-friendly name") {
+                    TextField("Friendly name", text: $label)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Label (optional)")
-                    .font(.system(size: 12, weight: .medium))
-                TextField("Friendly name", text: $label)
-                    .textFieldStyle(.roundedBorder)
-            }
-
-            Toggle(isOn: $mountOnLaunch) {
+            HStack(spacing: 10) {
                 Label("Mount on app launch", systemImage: "power")
-                    .font(.system(size: 13))
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
+                Toggle("", isOn: $mountOnLaunch)
+                    .labelsHidden()
             }
             .toggleStyle(.switch)
         }
     }
 
     private var optionsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Options")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
+        VStack(alignment: .leading, spacing: 8) {
+            SSHMountSectionTitle(title: "Options")
 
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
+                VStack(alignment: .leading, spacing: SSHMountTheme.compactSpacing) {
                     Text("Profile")
-                        .font(.system(size: 13))
-                    Spacer()
-                    Picker("", selection: $profile) {
-                        Text("Standard").tag(MountProfile.standard)
-                        Text("Git-safe").tag(MountProfile.git)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    Picker("Profile", selection: $profile) {
+                        ForEach(MountProfile.allCases, id: \.self) { profile in
+                            Text(profile.displayName).tag(profile)
+                        }
                     }
+                    .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 160)
+                    .frame(maxWidth: .infinity)
                 }
-                
-                if profile == .git {
-                    Text("Git profile enforces blocking I/O, single workers, and disabled caches for better compatibility.")
+
+                if let compatibilityDescription = profile.compatibilityDescription {
+                    Text(compatibilityDescription)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -258,27 +299,29 @@ struct MountView: View {
     }
 
     private var advancedSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 10) {
+            SSHMountSectionTitle(title: "Advanced")
+
             Group {
                 HStack {
                     Text("Read workers")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper("\(readWorkers)", value: $readWorkers, in: 1...8)
+                    Stepper(profile == .git ? "Primary session" : "\(readWorkers)", value: $readWorkers, in: profile == .git ? 0...0 : profile.workerRange)
                         .disabled(profile == .git)
                 }
                 
                 HStack {
                     Text("Write workers")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper("\(writeWorkers)", value: $writeWorkers, in: 1...8)
+                    Stepper(profile == .git ? "Primary session" : "\(writeWorkers)", value: $writeWorkers, in: profile == .git ? 0...0 : profile.workerRange)
                         .disabled(profile == .git)
                 }
                 
                 HStack {
                     Text("I/O Mode")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
                     Picker("", selection: $ioMode) {
                         Text("Blocking").tag(MountIOMode.blocking)
@@ -295,21 +338,21 @@ struct MountView: View {
             Group {
                 HStack {
                     Text("Health interval")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
                     Stepper("\(healthInterval)s", value: $healthInterval, in: 1...300)
                 }
                 
                 HStack {
                     Text("Health timeout")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
                     Stepper("\(healthTimeout)s", value: $healthTimeout, in: 1...120)
                 }
                 
                 HStack {
                     Text("Health failures")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
                     Stepper("\(healthFailures)", value: $healthFailures, in: 1...12)
                 }
@@ -320,7 +363,7 @@ struct MountView: View {
             Group {
                 HStack {
                     Text("Attr cache")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
                     Stepper("\(cacheAttrSeconds)s", value: $cacheAttrSeconds, in: 0...300)
                         .disabled(profile == .git)
@@ -328,27 +371,26 @@ struct MountView: View {
                 
                 HStack {
                     Text("Dir cache")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                     Spacer()
                     Stepper("\(cacheDirSeconds)s", value: $cacheDirSeconds, in: 0...300)
                         .disabled(profile == .git)
                 }
             }
         }
-        .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(SSHMountTheme.outerPadding)
+        .sshMountSurface(SSHMountTheme.surfaceSoft)
     }
 
     private var footerView: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             if let error = errorMessage {
                 HStack {
                     Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(SSHMountTheme.danger)
                     Text(error)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(SSHMountTheme.danger)
                 }
             }
             
@@ -359,32 +401,61 @@ struct MountView: View {
                     onDismiss()
                 } label: {
                     Text("Cancel")
-                        .frame(width: 80)
+                        .frame(width: 76)
                 }
                 .buttonStyle(.bordered)
-                
+
                 if editing != nil {
                     Button {
                         doSave()
                     } label: {
                         Text("Save")
-                            .frame(width: 80)
+                            .frame(width: 76)
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(SSHMountTheme.tint)
                     .disabled(!canSubmit)
                 } else {
                     Button {
                         doMount()
                     } label: {
                         Text("Mount")
-                            .frame(width: 80)
+                            .frame(width: 76)
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(SSHMountTheme.tint)
                     .disabled(!canSubmit)
                 }
             }
         }
-        .padding(16)
+        .padding(.horizontal, SSHMountTheme.outerPadding)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+    }
+
+    private func formField<Content: View>(
+        title: String,
+        detail: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            content()
+                .padding(.horizontal, SSHMountTheme.innerPadding)
+                .frame(minHeight: SSHMountTheme.controlHeight)
+                .sshMountSurface()
+        }
     }
 
     private var resolvedLocalPath: String {
@@ -420,6 +491,10 @@ struct MountView: View {
             queueTimeoutMs = opts.queueTimeoutMs
             cacheAttrSeconds = Int(opts.cacheTimeout.rounded())
             cacheDirSeconds = Int(opts.dirCacheTimeout.rounded())
+
+            if opts.profile == .git {
+                applyGitProfileOverrides()
+            }
         }
 
         if !hostAlias.isEmpty && !knownHosts.contains(hostAlias) {
@@ -431,8 +506,8 @@ struct MountView: View {
     }
 
     private func applyGitProfileOverrides() {
-        readWorkers = 1
-        writeWorkers = 1
+        readWorkers = 0
+        writeWorkers = 0
         ioMode = .blocking
         cacheAttrSeconds = 0
         cacheDirSeconds = 0

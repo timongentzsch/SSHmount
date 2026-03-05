@@ -3,6 +3,28 @@ import Foundation
 enum MountProfile: String, Codable, CaseIterable, Sendable {
     case standard
     case git
+
+    var displayName: String {
+        switch self {
+        case .standard:
+            "Standard"
+        case .git:
+            "Git-compatible"
+        }
+    }
+
+    var workerRange: ClosedRange<Int> {
+        self == .git ? 0...8 : 1...8
+    }
+
+    var compatibilityDescription: String? {
+        switch self {
+        case .standard:
+            nil
+        case .git:
+            "Uses the primary session only, disables caches, and requires remote SFTP fsync support for close-time durability checks."
+        }
+    }
 }
 
 enum MountIOMode: String, Codable, CaseIterable, Sendable {
@@ -30,21 +52,7 @@ struct MountOptions: Codable, Sendable, Equatable {
 
     // MARK: - Defaults
 
-    static let defaultStandard = MountOptions(
-        profile: .standard,
-        readWorkers: 1,
-        writeWorkers: 1,
-        ioMode: .blocking,
-        healthInterval: 5,
-        healthTimeout: 10,
-        healthFailures: 5,
-        busyThreshold: 32,
-        graceSeconds: 20,
-        queueTimeoutMs: 2_000,
-        cacheTimeout: 5,
-        dirCacheTimeout: 5,
-        authPassword: nil
-    )
+    static let defaultStandard = MountOptions()
 
     init(
         profile: MountProfile = .standard,
@@ -154,13 +162,13 @@ struct MountOptions: Codable, Sendable, Equatable {
             dict,
             key: "read_workers",
             defaultValue: 1,
-            range: 1...8
+            range: parsedProfile.workerRange
         )
         let writeWorkers = try Self.parseInt(
             dict,
             key: "write_workers",
             defaultValue: 1,
-            range: 1...8
+            range: parsedProfile.workerRange
         )
         let ioMode = try Self.parseEnum(
             dict,
@@ -252,8 +260,8 @@ struct MountOptions: Codable, Sendable, Equatable {
         if profile == .git {
             return MountOptions(
                 uncheckedProfile: .git,
-                readWorkers: 1,
-                writeWorkers: 1,
+                readWorkers: 0,
+                writeWorkers: 0,
                 ioMode: .blocking,
                 healthInterval: 5,
                 healthTimeout: 10,

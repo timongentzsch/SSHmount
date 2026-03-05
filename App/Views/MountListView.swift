@@ -1,28 +1,5 @@
 import SwiftUI
 
-extension MountStatus {
-    var color: Color {
-        switch self {
-        case .connected: return SSHMountTheme.success
-        case .connecting, .reconnecting: return SSHMountTheme.warning
-        case .unreachable: return SSHMountTheme.warning
-        case .disconnected: return .gray
-        case .error: return SSHMountTheme.danger
-        }
-    }
-    
-    var systemImage: String {
-        switch self {
-        case .connected: return "checkmark.circle"
-        case .connecting: return "arrow.triangle.2.circlepath"
-        case .reconnecting: return "arrow.clockwise"
-        case .unreachable: return "exclamationmark.triangle"
-        case .disconnected: return "circle"
-        case .error: return "xmark.circle"
-        }
-    }
-}
-
 struct MountListView: View {
     @ObservedObject var manager: MountManager
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
@@ -33,7 +10,7 @@ struct MountListView: View {
     @State private var searchText = ""
     @State private var activeSectionExpanded = true
     @State private var savedSectionExpanded = true
-    
+
     private var windowWidth: CGFloat {
         if showNewMount || editingConfig != nil {
             return 520
@@ -58,7 +35,7 @@ struct MountListView: View {
         guard !searchText.isEmpty else { return inactive }
         return inactive.filter { matchesSearch($0) }
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if !hasCompletedOnboarding || showOnboarding {
@@ -114,7 +91,7 @@ struct MountListView: View {
         .animation(.viewTransition, value: editingConfig?.id)
         .animation(.viewTransition, value: passwordPromptConfig?.id)
     }
-    
+
     private var mountList: some View {
         VStack(alignment: .leading, spacing: 0) {
             headerView
@@ -154,17 +131,17 @@ struct MountListView: View {
         .padding(.top, SSHMountTheme.outerPadding)
         .padding(.bottom, SSHMountTheme.innerPadding)
     }
-    
+
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 13, weight: .medium))
-            
+
             TextField("Filter connections", text: $searchText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13, weight: .medium))
-            
+
             if !searchText.isEmpty {
                 Button {
                     searchText = ""
@@ -182,7 +159,7 @@ struct MountListView: View {
         .padding(.horizontal, SSHMountTheme.outerPadding)
         .padding(.bottom, SSHMountTheme.innerPadding)
     }
-    
+
     @ViewBuilder
     private var sectionActive: some View {
         VStack(alignment: .leading, spacing: SSHMountTheme.compactSpacing) {
@@ -225,7 +202,7 @@ struct MountListView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private var sectionSaved: some View {
         let configs = filteredInactiveConfigs
@@ -273,7 +250,7 @@ struct MountListView: View {
             }
         }
     }
-    
+
     private func sectionHeader(
         title: String,
         icon: String,
@@ -293,28 +270,28 @@ struct MountListView: View {
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 10)
-                    
+
                     Image(systemName: icon)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(iconColor)
-                    
+
                     Text(title)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.primary)
-                    
+
                     if count > 0 {
                         SSHMountBadge(title: "\(count)")
                     }
                 }
             }
             .buttonStyle(.plain)
-            
+
             Spacer()
-            
+
             trailing()
         }
     }
-    
+
     private func emptyStateView(message: String, icon: String) -> some View {
         HStack {
             Spacer()
@@ -332,7 +309,7 @@ struct MountListView: View {
         .frame(maxWidth: .infinity)
         .sshMountSurface(SSHMountTheme.surfaceSoft)
     }
-    
+
     @ViewBuilder
     private func connectionActions(for entry: MountEntry) -> some View {
         if entry.status == .connected {
@@ -344,7 +321,7 @@ struct MountListView: View {
             }
             .buttonStyle(SSHMountIconButtonStyle(layout: .square))
             .help("Open in Finder")
-            
+
             Button {
                 openTerminal(at: entry.config.localPath)
             } label: {
@@ -353,7 +330,7 @@ struct MountListView: View {
             }
             .buttonStyle(SSHMountIconButtonStyle(layout: .square))
             .help("Open in Terminal")
-            
+
             Button {
                 Task { await manager.unmount(entry) }
             } label: {
@@ -364,7 +341,7 @@ struct MountListView: View {
             .help("Unmount")
         }
     }
-    
+
     @ViewBuilder
     private func savedConnectionActions(for config: MountConfig) -> some View {
         Button {
@@ -382,7 +359,7 @@ struct MountListView: View {
         }
         .buttonStyle(SSHMountIconButtonStyle(layout: .square))
         .help("Mount")
-        
+
         Button {
             withAnimation(.viewTransition) {
                 editingConfig = config
@@ -393,7 +370,7 @@ struct MountListView: View {
         }
         .buttonStyle(SSHMountIconButtonStyle(layout: .square))
         .help("Edit")
-        
+
         Button {
             manager.deleteConfig(config)
         } label: {
@@ -403,7 +380,7 @@ struct MountListView: View {
         .buttonStyle(SSHMountIconButtonStyle(layout: .square))
         .help("Delete")
     }
-    
+
     private var footerView: some View {
         HStack(spacing: 10) {
             Button {
@@ -413,9 +390,9 @@ struct MountListView: View {
                     .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(SSHMountIconButtonStyle())
-            
+
             Spacer()
-            
+
             if !manager.permissionStatus.allGood {
                 Button {
                     showOnboarding = true
@@ -426,7 +403,7 @@ struct MountListView: View {
                 .buttonStyle(SSHMountIconButtonStyle(layout: .square))
                 .help("Setup issues")
             }
-            
+
             Button {
                 Task {
                     await manager.unmountAll()
@@ -441,155 +418,4 @@ struct MountListView: View {
         .padding(.horizontal, SSHMountTheme.outerPadding)
         .padding(.vertical, SSHMountTheme.innerPadding)
     }
-}
-
-// MARK: - Shared Connection Row
-
-struct ConnectionRow<Actions: View>: View {
-    let label: String
-    let subtitle: String?
-    let host: String?
-    let status: MountStatus
-    var connectedSince: Date?
-    var compactLayout = false
-    @ViewBuilder let actions: () -> Actions
-
-    private var shouldPulse: Bool {
-        status == .unreachable || status == .reconnecting || status == .connecting
-    }
-
-    private var showStatusText: Bool {
-        status != .disconnected
-    }
-
-    private var tooltipText: String {
-        var parts: [String] = []
-        if let host = host {
-            parts.append(host)
-        }
-        if let subtitle = subtitle {
-            parts.append(subtitle)
-        }
-        parts.append(status.text)
-        return parts.joined(separator: " • ")
-    }
-
-    var body: some View {
-        HStack(spacing: SSHMountTheme.innerPadding) {
-            Image(systemName: status.systemImage)
-                .font(.system(size: compactLayout ? 12 : 13, weight: .medium))
-                .foregroundStyle(status.color)
-                .symbolEffect(.pulse, isActive: shouldPulse)
-                .frame(width: 16, height: 16)
-
-            VStack(alignment: .leading, spacing: compactLayout ? 2 : 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(label)
-                        .font(.system(size: compactLayout ? 12 : 13, weight: .semibold))
-                        .lineLimit(1)
-
-                    if showStatusText {
-                        Text(status.text)
-                            .font(.system(size: 10))
-                            .foregroundStyle(status.color)
-                    }
-                }
-
-                if let host {
-                    Text(host)
-                        .font(.system(size: compactLayout ? 11 : 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                if let subtitle, !compactLayout {
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                if let connectedSince, status == .connected {
-                    Text("Connected \(connectedSince, style: .relative) ago")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            Spacer(minLength: compactLayout ? SSHMountTheme.compactSpacing : SSHMountTheme.innerPadding)
-
-            HStack(spacing: compactLayout ? 4 : 6) {
-                actions()
-            }
-        }
-        .padding(.horizontal, SSHMountTheme.innerPadding)
-        .padding(.vertical, compactLayout ? 6 : 8)
-        .sshMountSurface(SSHMountTheme.surfaceSoft)
-        .contentShape(Rectangle())
-        .help(tooltipText)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(label), \(status.text)")
-    }
-}
-
-// MARK: - Helpers
-
-/// Open Terminal.app with a new window cd'd to the given directory.
-/// Uses `do script` without AppleScript `activate` so existing Terminal windows
-/// stay where they are, then brings only Terminal's front window forward via
-/// NSRunningApplication.activate() (macOS 14+ doesn't raise all windows).
-private func openTerminal(at path: String) {
-    let script = """
-        on run argv
-            set targetPath to item 1 of argv
-            tell application "Terminal"
-                do script "cd " & quoted form of targetPath & "; clear"
-                activate
-            end tell
-        end run
-        """
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    process.arguments = ["-e", script, path]
-    try? process.run()
-}
-
-/// Open a single Finder window for the given path.
-/// Uses NSWorkspace.selectFile which reuses an existing window if one is already
-/// showing the same path, and only brings that window to front.
-private func openInFinder(path: String) {
-    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-}
-
-/// Open ~/.ssh/config in the default editor, creating it if needed.
-private func openSSHConfig() {
-    let configPath = PathUtilities.realHomeDirectory + "/.ssh/config"
-    let configDirectory = (configPath as NSString).deletingLastPathComponent
-    let fileManager = FileManager.default
-    let workspace = NSWorkspace.shared
-    let fileURL = URL(fileURLWithPath: configPath)
-
-    try? fileManager.createDirectory(atPath: configDirectory, withIntermediateDirectories: true)
-    if !fileManager.fileExists(atPath: configPath) {
-        try? "".write(toFile: configPath, atomically: true, encoding: .utf8)
-    }
-
-    let preferredBundleIDs = [
-        "com.microsoft.VSCode",
-        "com.microsoft.VSCodeInsiders",
-    ]
-
-    for bundleID in preferredBundleIDs {
-        if let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID) {
-            workspace.open(
-                [fileURL],
-                withApplicationAt: appURL,
-                configuration: NSWorkspace.OpenConfiguration(),
-                completionHandler: { _, _ in }
-            )
-            return
-        }
-    }
-
-    workspace.open(fileURL)
 }

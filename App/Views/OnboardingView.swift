@@ -5,9 +5,13 @@ struct OnboardingView: View {
     var onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: SSHMountTheme.sectionSpacing) {
             Text("Setup")
-                .font(.headline)
+                .font(.system(size: 18, weight: .semibold))
+
+            Text("Install the app, enable the filesystem extension, and make sure SSH keys are available.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
 
             OnboardingStep(
                 number: 1,
@@ -36,11 +40,13 @@ struct OnboardingView: View {
             HStack {
                 Spacer()
                 Button("Get Started") { onDismiss() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(SSHMountTheme.tint)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!manager.permissionStatus.allGood)
+                .disabled(!manager.permissionStatus.allGood)
             }
         }
-        .padding()
+        .padding(SSHMountTheme.outerPadding)
     }
 }
 
@@ -52,23 +58,30 @@ struct OnboardingStep: View {
     var action: (String, () -> Void)? = nil
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "\(number).circle")
-                .foregroundStyle(ok ? .green : .secondary)
-                .font(.title3)
+        HStack(alignment: .top, spacing: SSHMountTheme.innerPadding) {
+            Image(systemName: ok ? "checkmark.circle" : "\(number).circle")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(.body, weight: .medium))
+            VStack(alignment: .leading, spacing: SSHMountTheme.compactSpacing) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
                 Text(description)
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
 
                 if let (label, handler) = action, !ok {
                     Button(label) { handler() }
-                        .font(.caption)
+                        .font(.system(size: 11, weight: .semibold))
+                        .buttonStyle(.bordered)
+                        .tint(SSHMountTheme.tint)
                         .padding(.top, 2)
                 }
             }
+
+            Spacer()
         }
+        .padding(.vertical, 2)
     }
 }

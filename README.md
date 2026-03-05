@@ -166,9 +166,11 @@ For Git-heavy workflows:
 --profile git
 ```
 
+The `git` profile forces single-session I/O, disables attribute/directory caches, and performs a close-time SFTP `fsync`. If the server does not support SFTP `fsync`, close operations will fail instead of silently downgrading consistency guarantees.
+
 ## Important note about Git over SSHFS
 
-For repositories mounted over SFTP/SSHFS, Git metadata writes can be unreliable depending on server/filesystem behavior.
+For repositories mounted over SFTP/SSHFS, Git metadata writes can still be unreliable depending on server/filesystem behavior. The `git` profile improves consistency, but it is slower and depends on remote SFTP `fsync` support.
 
 For best reliability, run Git write operations directly on the server:
 

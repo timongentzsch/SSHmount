@@ -12,12 +12,12 @@ struct PasswordPromptView: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: SSHMountTheme.innerPadding) {
             Text(title)
-                .font(.headline)
+                .font(.system(size: 18, weight: .semibold))
 
             Text(.init(message))
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
 
             SecureField("Password", text: $password)
@@ -34,6 +34,7 @@ struct PasswordPromptView: View {
                 Button("Cancel") {
                     onCancel()
                 }
+                .buttonStyle(.bordered)
                 .keyboardShortcut(.cancelAction)
 
                 Button(actionLabel) {
@@ -41,11 +42,13 @@ struct PasswordPromptView: View {
                         onSubmit(password)
                     }
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(SSHMountTheme.tint)
                 .keyboardShortcut(.defaultAction)
                 .disabled(password.isEmpty)
             }
         }
-        .padding()
+        .padding(SSHMountTheme.outerPadding)
         .onAppear {
             isFocused = true
         }

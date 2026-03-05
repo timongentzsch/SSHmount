@@ -7,6 +7,7 @@ final class ExtensionBridge: @unchecked Sendable {
     static let shared = ExtensionBridge()
 
     static let fsType = "sshfs"
+    private static let managedVolumesRoot = PathUtilities.realHomeDirectory + "/Volumes"
 
     /// Mount a remote directory via the FSKit extension.
     /// Constructs an ssh:// URL and calls `mount -F -t sshfs`.
@@ -14,14 +15,7 @@ final class ExtensionBridge: @unchecked Sendable {
     /// Returns the resolved mount point path.
     @discardableResult
     func requestMount(_ request: MountRequest) async throws -> String {
-        var mountPoint: String
-        if request.localPath.isEmpty {
-            let mountsDir = PathUtilities.realHomeDirectory + "/Volumes"
-            let dirName = mountPointName(label: request.label, hostAlias: request.hostAlias)
-            mountPoint = "\(mountsDir)/\(dirName)"
-        } else {
-            mountPoint = PathUtilities.expandTilde(request.localPath)
-        }
+        let mountPoint = resolvedMountPoint(for: request)
 
         // Create mount point if needed
         if !FileManager.default.fileExists(atPath: mountPoint) {
@@ -45,7 +39,7 @@ final class ExtensionBridge: @unchecked Sendable {
             Log.bridge.error("Mount failed: \(stderr) (exit \(result.exitCode))")
             // Clean up auto-created mount point on failure
             if request.localPath.isEmpty {
-                try? FileManager.default.removeItem(atPath: mountPoint)
+                removeManagedMountPointIfNeeded(mountPoint)
             }
             throw MountError.mountFailed(stderr.isEmpty ? "mount exited with code \(result.exitCode)" : stderr)
         }
@@ -88,10 +82,7 @@ final class ExtensionBridge: @unchecked Sendable {
         }
 
         // Clean up auto-created mount point directory under ~/Volumes
-        let userVolumes = PathUtilities.realHomeDirectory + "/Volumes"
-        if resolved.hasPrefix(userVolumes) {
-            try? FileManager.default.removeItem(atPath: resolved)
-        }
+        removeManagedMountPointIfNeeded(resolved)
     }
 
     /// List active sshfs mounts by parsing `mount` output.
@@ -122,6 +113,20 @@ final class ExtensionBridge: @unchecked Sendable {
 
     /// Build a Finder-friendly mount point directory name from the user's label.
     /// Falls back to hostAlias if label is nil or empty.
+    private func resolvedMountPoint(for request: MountRequest) -> String {
+        guard request.localPath.isEmpty else {
+            return PathUtilities.expandTilde(request.localPath)
+        }
+
+        let dirName = mountPointName(label: request.label, hostAlias: request.hostAlias)
+        return "\(Self.managedVolumesRoot)/\(dirName)"
+    }
+
+    private func removeManagedMountPointIfNeeded(_ path: String) {
+        guard path.hasPrefix(Self.managedVolumesRoot) else { return }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     private func mountPointName(label: String?, hostAlias: String) -> String {
         let raw = (label ?? hostAlias).trimmingCharacters(in: .whitespaces)
         guard !raw.isEmpty else { return sanitizePathComponent(hostAlias) }
