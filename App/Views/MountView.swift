@@ -1,21 +1,5 @@
 import SwiftUI
 
-private struct MountViewContentHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-private struct MountViewViewportHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 struct MountView: View {
     private static let defaultOptions = MountOptions.defaultStandard
 
@@ -48,8 +32,6 @@ struct MountView: View {
     @State private var showPasswordPrompt = false
     @State private var pendingMountConfig: MountConfig?
     @State private var showAdvanced = false
-    @State private var contentHeight: CGFloat = 0
-    @State private var viewportHeight: CGFloat = 0
 
     private var hostAliasIsValid: Bool {
         knownHosts.contains(hostAlias)
@@ -61,10 +43,6 @@ struct MountView: View {
 
     private var sshConfigPath: String {
         PathUtilities.realHomeDirectory + "/.ssh/config"
-    }
-
-    private var showsScrollHint: Bool {
-        contentHeight > viewportHeight + 24
     }
 
     var body: some View {
@@ -80,32 +58,8 @@ struct MountView: View {
                 }
                 .padding(.horizontal, SSHMountTheme.outerPadding)
                 .padding(.vertical, 10)
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear
-                            .preference(key: MountViewContentHeightKey.self, value: proxy.size.height)
-                    }
-                )
             }
             .scrollIndicators(.visible)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear
-                        .preference(key: MountViewViewportHeightKey.self, value: proxy.size.height)
-                }
-            )
-            .overlay(alignment: .bottomTrailing) {
-                if showsScrollHint {
-                    Label("Scroll", systemImage: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.regularMaterial, in: Capsule())
-                        .padding(.trailing, SSHMountTheme.outerPadding)
-                        .padding(.bottom, 8)
-                }
-            }
 
             footerView
         }
@@ -120,8 +74,7 @@ struct MountView: View {
                     showPasswordPrompt = false
                     if let config = pendingMountConfig {
                         Task {
-                            let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let result = await manager.mountWithResult(config, sessionPassword: trimmed.isEmpty ? nil : trimmed)
+                            let result = await manager.mountWithPassword(password, config: config)
                             switch result {
                             case .success:
                                 onDismiss()
@@ -149,8 +102,6 @@ struct MountView: View {
                 applyGitProfileOverrides()
             }
         }
-        .onPreferenceChange(MountViewContentHeightKey.self) { contentHeight = $0 }
-        .onPreferenceChange(MountViewViewportHeightKey.self) { viewportHeight = $0 }
     }
 
     private var headerView: some View {

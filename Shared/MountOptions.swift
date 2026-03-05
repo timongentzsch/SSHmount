@@ -1,5 +1,11 @@
 import Foundation
 
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(range.upperBound, max(range.lowerBound, self))
+    }
+}
+
 enum MountProfile: String, Codable, CaseIterable, Sendable {
     case standard
     case git
@@ -49,6 +55,18 @@ struct MountOptions: Codable, Sendable, Equatable {
     let dirCacheTimeout: TimeInterval
     /// Session-only password auth fallback. Never persisted by UI.
     let authPassword: String?
+
+    // MARK: - Validation Ranges
+
+    static let readWorkerRange = 1...8
+    static let writeWorkerRange = 1...8
+    static let healthIntervalRange: ClosedRange<Double> = 1...300
+    static let healthTimeoutRange: ClosedRange<Double> = 1...120
+    static let healthFailuresRange = 1...12
+    static let busyThresholdRange = 1...4096
+    static let graceSecondsRange: ClosedRange<Double> = 0...300
+    static let queueTimeoutMsRange = 100...60_000
+    static let cacheTimeoutRange: ClosedRange<Double> = 0...300
 
     // MARK: - Defaults
 
@@ -162,13 +180,13 @@ struct MountOptions: Codable, Sendable, Equatable {
             dict,
             key: "read_workers",
             defaultValue: 1,
-            range: parsedProfile.workerRange
+            range: parsedProfile == .git ? 0...8 : Self.readWorkerRange
         )
         let writeWorkers = try Self.parseInt(
             dict,
             key: "write_workers",
             defaultValue: 1,
-            range: parsedProfile.workerRange
+            range: parsedProfile == .git ? 0...8 : Self.writeWorkerRange
         )
         let ioMode = try Self.parseEnum(
             dict,
@@ -179,49 +197,49 @@ struct MountOptions: Codable, Sendable, Equatable {
             dict,
             key: "health_interval_s",
             defaultValue: 5,
-            range: 1...300
+            range: Self.healthIntervalRange
         )
         let healthTimeout = try Self.parseDouble(
             dict,
             key: "health_timeout_s",
             defaultValue: 10,
-            range: 1...120
+            range: Self.healthTimeoutRange
         )
         let healthFailures = try Self.parseInt(
             dict,
             key: "health_failures",
             defaultValue: 5,
-            range: 1...12
+            range: Self.healthFailuresRange
         )
         let busyThreshold = try Self.parseInt(
             dict,
             key: "busy_threshold",
             defaultValue: 32,
-            range: 1...4096
+            range: Self.busyThresholdRange
         )
         let graceSeconds = try Self.parseDouble(
             dict,
             key: "grace_seconds",
             defaultValue: 20,
-            range: 0...300
+            range: Self.graceSecondsRange
         )
         let queueTimeoutMs = try Self.parseInt(
             dict,
             key: "queue_timeout_ms",
             defaultValue: 2_000,
-            range: 100...60_000
+            range: Self.queueTimeoutMsRange
         )
         let cacheTimeout = try Self.parseDouble(
             dict,
             key: "cache_attr_s",
             defaultValue: 5,
-            range: 0...300
+            range: Self.cacheTimeoutRange
         )
         let dirCacheTimeout = try Self.parseDouble(
             dict,
             key: "cache_dir_s",
             defaultValue: cacheTimeout,
-            range: 0...300
+            range: Self.cacheTimeoutRange
         )
         let authPassword = dict["auth_password"]?.isEmpty == false ? dict["auth_password"] : nil
 
@@ -267,8 +285,8 @@ struct MountOptions: Codable, Sendable, Equatable {
                 healthTimeout: 10,
                 healthFailures: max(7, healthFailures),
                 busyThreshold: max(64, busyThreshold),
-                graceSeconds: min(300, max(0, graceSeconds)),
-                queueTimeoutMs: min(60_000, max(100, queueTimeoutMs)),
+                graceSeconds: graceSeconds.clamped(to: graceSecondsRange),
+                queueTimeoutMs: queueTimeoutMs.clamped(to: queueTimeoutMsRange),
                 cacheTimeout: 0,
                 dirCacheTimeout: 0,
                 authPassword: authPassword
@@ -277,17 +295,17 @@ struct MountOptions: Codable, Sendable, Equatable {
 
         return MountOptions(
             uncheckedProfile: profile,
-            readWorkers: min(8, max(1, readWorkers)),
-            writeWorkers: min(8, max(1, writeWorkers)),
+            readWorkers: readWorkers.clamped(to: readWorkerRange),
+            writeWorkers: writeWorkers.clamped(to: writeWorkerRange),
             ioMode: ioMode,
-            healthInterval: min(300, max(1, healthInterval)),
-            healthTimeout: min(120, max(1, healthTimeout)),
-            healthFailures: min(12, max(1, healthFailures)),
-            busyThreshold: min(4096, max(1, busyThreshold)),
-            graceSeconds: min(300, max(0, graceSeconds)),
-            queueTimeoutMs: min(60_000, max(100, queueTimeoutMs)),
-            cacheTimeout: min(300, max(0, cacheTimeout)),
-            dirCacheTimeout: min(300, max(0, dirCacheTimeout)),
+            healthInterval: healthInterval.clamped(to: healthIntervalRange),
+            healthTimeout: healthTimeout.clamped(to: healthTimeoutRange),
+            healthFailures: healthFailures.clamped(to: healthFailuresRange),
+            busyThreshold: busyThreshold.clamped(to: busyThresholdRange),
+            graceSeconds: graceSeconds.clamped(to: graceSecondsRange),
+            queueTimeoutMs: queueTimeoutMs.clamped(to: queueTimeoutMsRange),
+            cacheTimeout: cacheTimeout.clamped(to: cacheTimeoutRange),
+            dirCacheTimeout: dirCacheTimeout.clamped(to: cacheTimeoutRange),
             authPassword: authPassword
         )
     }

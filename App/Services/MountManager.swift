@@ -37,8 +37,16 @@ final class MountManager: ObservableObject {
     private static let permissionRefreshInterval: TimeInterval = 300
 
     @Published var mounts: [MountEntry] = []
-    @Published var savedConfigs: [MountConfig] = []
-    @Published var permissionStatus = PermissionStatus()
+
+    let configStore = MountConfigStore()
+    let permissionChecker = PermissionChecker()
+
+    var savedConfigs: [MountConfig] {
+        get { configStore.savedConfigs }
+        set { configStore.savedConfigs = newValue }
+    }
+
+    var permissionStatus: PermissionStatus { permissionChecker.status }
 
     private var pollTask: Task<Void, Never>?
     private nonisolated(unsafe) var sleepObserver: NSObjectProtocol?
@@ -76,21 +84,13 @@ final class MountManager: ObservableObject {
         return status
     }
 
-    private let configURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("SSHMount", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("mounts.json")
-    }()
-
     init() {
-        loadConfigs()
         startMountTablePolling()
         startSleepWakeHandling()
         startExtensionStateListeners()
         Task {
             await reconcileMountTable()
-            await refreshPermissions()
+            await permissionChecker.refresh()
             await autoMountOnLaunch()
         }
     }
@@ -115,6 +115,12 @@ final class MountManager: ObservableObject {
         case success
         case authenticationFailed
         case otherError(String)
+    }
+
+    /// Mount with a user-entered password, trimming whitespace and treating blank as nil.
+    func mountWithPassword(_ password: String, config: MountConfig) async -> MountResult {
+        let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        return await mountWithResult(config, sessionPassword: trimmed.isEmpty ? nil : trimmed)
     }
 
     /// Mount with detailed result indicating auth failures vs other errors.
@@ -355,7 +361,7 @@ final class MountManager: ObservableObject {
                 elapsedSincePermissionCheck += interval
                 if elapsedSincePermissionCheck >= Self.permissionRefreshInterval {
                     elapsedSincePermissionCheck = 0
-                    await self?.refreshPermissions()
+                    await self?.permissionChecker.refresh()
                 }
             }
         }
@@ -469,91 +475,11 @@ final class MountManager: ObservableObject {
     // MARK: - Config Persistence
 
     func saveConfig(_ config: MountConfig) {
-        if let idx = savedConfigs.firstIndex(where: { $0.id == config.id }) {
-            savedConfigs[idx] = config
-        } else {
-            savedConfigs.append(config)
-        }
-        persistConfigs()
+        configStore.saveConfig(config)
     }
 
     func deleteConfig(_ config: MountConfig) {
-        savedConfigs.removeAll { $0.id == config.id }
-        persistConfigs()
-    }
-
-    private func loadConfigs() {
-        guard let data = try? Data(contentsOf: configURL) else {
-            Log.app.notice("No saved mount configs found")
-            return
-        }
-        guard let configs = try? JSONDecoder().decode([MountConfig].self, from: data) else {
-            Log.app.error("Failed to decode saved mount configs, resetting file")
-            savedConfigs = []
-            do {
-                try Data("[]".utf8).write(to: configURL, options: .atomic)
-            } catch {
-                Log.app.error("Failed to reset invalid mount config file: \(error.localizedDescription, privacy: .public)")
-            }
-            return
-        }
-        savedConfigs = configs
-    }
-
-    private func persistConfigs() {
-        guard let data = try? JSONEncoder().encode(savedConfigs) else {
-            Log.app.error("Failed to encode mount configs")
-            return
-        }
-        do {
-            try data.write(to: configURL, options: .atomic)
-        } catch {
-            Log.app.error("Failed to save mount configs: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    // MARK: - Permission Checks
-
-    func refreshPermissions() async {
-        let installed = FileManager.default.fileExists(atPath: "/Applications/SSHMount.app")
-        let extensionBundlePath = "/Applications/SSHMount.app/Contents/Extensions/SSHMountFS.appex"
-        let extensionBundleExists = FileManager.default.fileExists(atPath: extensionBundlePath)
-
-        var registered = false
-        var enabled = false
-        if let result = try? await ExtensionBridge.shared.run(
-            "/usr/bin/pluginkit", arguments: ["-m", "-i", "com.sshmount.app.fs"]
-        ) {
-            let pluginID = "com.sshmount.app.fs"
-            let mergedOutput = result.stdout + "\n" + result.stderr
-            let lines = mergedOutput
-                .split(separator: "\n")
-                .map { String($0) }
-
-            registered = result.exitCode == 0 && lines.contains { $0.contains(pluginID) }
-            enabled = lines.contains { line in
-                line.contains(pluginID) && line.trimmingCharacters(in: .whitespaces).hasPrefix("+")
-            }
-
-            if mergedOutput.contains("Connection invalid") {
-                Log.app.notice("pluginkit connection invalid while checking extension status")
-            }
-        } else if extensionBundleExists {
-            registered = true
-            enabled = true
-            Log.app.notice("Falling back to bundle-based extension status check")
-        }
-
-        let home = PathUtilities.realHomeDirectory
-        let keyNames = ["id_ed25519", "id_rsa", "id_ecdsa"]
-        let hasKeys = keyNames.contains { FileManager.default.fileExists(atPath: "\(home)/.ssh/\($0)") }
-
-        permissionStatus = PermissionStatus(
-            appInstalled: installed,
-            extensionRegistered: registered,
-            extensionEnabled: enabled,
-            sshKeysFound: hasKeys
-        )
+        configStore.deleteConfig(config)
     }
 
     private func updateMounts(

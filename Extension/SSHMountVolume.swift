@@ -250,7 +250,7 @@ final class SSHMountVolume: FSVolume,
         return value
     }
 
-    private func withIOSessionReconnect<T>(_ session: SFTPSession, op: () throws -> T) throws -> T {
+    private func withWorkerReconnect<T>(_ session: SFTPSession, op: () throws -> T) throws -> T {
         try withHealthTracked {
             do {
                 return try op()
@@ -264,11 +264,11 @@ final class SSHMountVolume: FSVolume,
     }
 
     /// Dispatch to the appropriate reconnect strategy based on which session is being used.
-    private func withSessionReconnect<T>(_ session: SFTPSession, op: () throws -> T) throws -> T {
+    private func withAutoReconnect<T>(_ session: SFTPSession, op: () throws -> T) throws -> T {
         if session === self.sftp {
-            return try withReconnect(op)
+            return try withPrimaryReconnect(op)
         } else {
-            return try withIOSessionReconnect(session, op: op)
+            return try withWorkerReconnect(session, op: op)
         }
     }
 
@@ -364,14 +364,14 @@ final class SSHMountVolume: FSVolume,
     /// If the health monitor indicates the connection is suspended or reconnecting,
     /// waits up to `reconnect_timeout` seconds for recovery before failing.
     /// On connection error during the operation, triggers reconnection and retries once.
-    private func withReconnect<T>(_ op: () throws -> T) throws -> T {
+    private func withPrimaryReconnect<T>(_ op: () throws -> T) throws -> T {
         try withHealthTracked {
             // If we know the connection is down, wait for reconnection first
             if healthMonitor.state == .reconnecting {
-                Log.volume.debug("withReconnect: connection not ready (state=\(self.healthMonitor.state.description, privacy: .public)), waiting")
+                Log.volume.debug("withPrimaryReconnect: connection not ready (state=\(self.healthMonitor.state.description, privacy: .public)), waiting")
                 let recovered = healthMonitor.waitForConnected(timeout: reconnectWaitTimeout)
                 if !recovered {
-                    Log.volume.error("withReconnect: timed out waiting for reconnection")
+                    Log.volume.error("withPrimaryReconnect: timed out waiting for reconnection")
                     throw POSIXError(.ETIMEDOUT)
                 }
             }
@@ -384,7 +384,7 @@ final class SSHMountVolume: FSVolume,
                 healthMonitor.triggerReconnect(reason: .transportError)
                 let recovered = healthMonitor.waitForConnected(timeout: reconnectWaitTimeout)
                 guard recovered else {
-                    Log.volume.error("withReconnect: reconnect failed")
+                    Log.volume.error("withPrimaryReconnect: reconnect failed")
                     throw POSIXError(.ETIMEDOUT)
                 }
                 return try op()
@@ -441,7 +441,7 @@ final class SSHMountVolume: FSVolume,
             return cached
         }
 
-        let attrs = try withReconnect {
+        let attrs = try withPrimaryReconnect {
             try sftp.stat(path: path)
         }
 
@@ -465,7 +465,7 @@ final class SSHMountVolume: FSVolume,
             return cached
         }
 
-        let entries = try withReconnect { try sftp.readDirectory(path: path) }
+        let entries = try withPrimaryReconnect { try sftp.readDirectory(path: path) }
 
         if timeout > 0 {
             cache.setDirEntries(entries, forPath: path, timeout: timeout)
@@ -628,10 +628,10 @@ final class SSHMountVolume: FSVolume,
                     attrs.flags |= UInt(LIBSSH2_SFTP_ATTR_ACMODTIME)
                 }
 
-                try self.withReconnect { try self.sftp.setstat(path: itemPath, attrs: &attrs) }
+                try self.withPrimaryReconnect { try self.sftp.setstat(path: itemPath, attrs: &attrs) }
                 self.invalidateCache(itemPath, includeParent: false)
 
-                let updated = try self.withReconnect {
+                let updated = try self.withPrimaryReconnect {
                     try self.sftp.stat(path: itemPath)
                 }
                 let id = self.itemID(forPath: itemPath)
@@ -740,7 +740,7 @@ final class SSHMountVolume: FSVolume,
             reply(nil, nil, POSIXError(.EAGAIN))
         }) {
             do {
-                try self.withReconnect {
+                try self.withPrimaryReconnect {
                     switch type {
                     case .directory:
                         try self.sftp.mkdir(path: fullPath, permissions: mode)
@@ -776,7 +776,7 @@ final class SSHMountVolume: FSVolume,
         }) {
             do {
                 self.releaseHandleAcrossSessions(path: fullPath)
-                try self.withReconnect {
+                try self.withPrimaryReconnect {
                     let attrs = try self.sftp.stat(path: fullPath)
                     if attrs.isDirectory {
                         try self.sftp.rmdir(path: fullPath)
@@ -817,7 +817,7 @@ final class SSHMountVolume: FSVolume,
             do {
                 self.releaseHandleAcrossSessions(path: srcPath)
                 self.releaseHandleAcrossSessions(path: dstPath)
-                try self.withReconnect { try self.sftp.rename(from: srcPath, to: dstPath) }
+                try self.withPrimaryReconnect { try self.sftp.rename(from: srcPath, to: dstPath) }
                 self.invalidateCache(srcPath)
                 self.invalidateCache(dstPath)
                 self.untrack(item)
@@ -846,7 +846,7 @@ final class SSHMountVolume: FSVolume,
             reply(nil, POSIXError(.EAGAIN))
         }) {
             do {
-                let target = try self.withReconnect { try self.sftp.readlink(path: itemPath) }
+                let target = try self.withPrimaryReconnect { try self.sftp.readlink(path: itemPath) }
                 reply(FSFileName(string: target), nil)
             } catch {
                 Log.volume.notice("readSymbolicLink failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -873,7 +873,7 @@ final class SSHMountVolume: FSVolume,
             reply(nil, nil, POSIXError(.EAGAIN))
         }) {
             do {
-                try self.withReconnect { try self.sftp.symlink(target: target, linkPath: linkPath) }
+                try self.withPrimaryReconnect { try self.sftp.symlink(target: target, linkPath: linkPath) }
                 self.invalidateCache(linkPath)
                 let (newItem, _) = self.item(forPath: linkPath)
                 reply(newItem, name, nil)
@@ -964,7 +964,7 @@ final class SSHMountVolume: FSVolume,
                     let readLength = min(length, dst.count, Self.defaultIOSize)
                     guard readLength > 0 else { return 0 }
                     let readOffset = UInt64(offset)
-                    return try self.withSessionReconnect(session) {
+                    return try self.withAutoReconnect(session) {
                         try session.readFile(path: itemPath, offset: readOffset, length: readLength, into: dst)
                     }
                 }
@@ -997,7 +997,7 @@ final class SSHMountVolume: FSVolume,
             do {
                 let writeOffset = UInt64(offset)
                 let chunk = contents.count > Self.defaultIOSize ? Data(contents.prefix(Self.defaultIOSize)) : contents
-                let written = try self.withSessionReconnect(session) {
+                let written = try self.withAutoReconnect(session) {
                     try session.writeFile(path: itemPath, offset: writeOffset, data: chunk)
                 }
                 self.invalidateCache(itemPath, includeParent: false)

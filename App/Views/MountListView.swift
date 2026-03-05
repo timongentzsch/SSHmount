@@ -56,8 +56,7 @@ struct MountListView: View {
                             passwordPromptConfig = nil
                         }
                         Task {
-                            let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
-                            _ = await manager.mountWithResult(config, sessionPassword: trimmed.isEmpty ? nil : trimmed)
+                            _ = await manager.mountWithPassword(password, config: config)
                         }
                     },
                     onCancel: {
