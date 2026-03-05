@@ -100,6 +100,7 @@ final class SFTPSession: @unchecked Sendable {
     private var handleCache: [String: CachedHandle] = [:]
     /// Maximum number of handles to keep open.
     private static let maxCachedHandles = 16
+    private var didReportUnsupportedFsync = false
     private var isNonBlockingIO: Bool { ioMode == .nonBlocking }
 
     private func shouldRetryEAGAIN() -> Bool {
@@ -221,10 +222,16 @@ final class SFTPSession: @unchecked Sendable {
         if rc != 0 {
             let error = sftpError("fsync failed for \(path)")
             if case .sftpCodedError(_, let code) = error, code == SFTPErrorCode.opUnsupported.rawValue {
-                entry.dirty = false
                 entry.lastUsed = Date()
                 handleCache[path] = entry
-                return
+                if !didReportUnsupportedFsync {
+                    Log.sftp.notice("Remote server does not support SFTP fsync; git profile durability checks will fail")
+                    didReportUnsupportedFsync = true
+                }
+                throw MountError.sftpCodedError(
+                    "Remote server does not support SFTP fsync required by the git profile",
+                    code: code
+                )
             }
             throw error
         }
@@ -295,16 +302,16 @@ final class SFTPSession: @unchecked Sendable {
             setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
             // Cap TCP connect() to 5s so reconnect attempts fail fast when host is unreachable
             var connectTimeout: Int32 = 5
-            setsockopt(sock, IPPROTO_TCP, 0x20, &connectTimeout, socklen_t(MemoryLayout<Int32>.size)) // TCP_CONNECTIONTIMEOUT
+            setsockopt(sock, IPPROTO_TCP, TCP_CONNECTIONTIMEOUT, &connectTimeout, socklen_t(MemoryLayout<Int32>.size))
             var keepAlive: Int32 = 1
             setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, socklen_t(MemoryLayout<Int32>.size))
             // Start TCP keepalive probes after 5s idle, every 1s, give up after 3 failures → dead in ~8s
             var keepIdle: Int32 = 5
             setsockopt(sock, IPPROTO_TCP, TCP_KEEPALIVE, &keepIdle, socklen_t(MemoryLayout<Int32>.size))
             var keepIntvl: Int32 = 1
-            setsockopt(sock, IPPROTO_TCP, 0x101, &keepIntvl, socklen_t(MemoryLayout<Int32>.size)) // TCP_KEEPINTVL
+            setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepIntvl, socklen_t(MemoryLayout<Int32>.size))
             var keepCnt: Int32 = 3
-            setsockopt(sock, IPPROTO_TCP, 0x102, &keepCnt, socklen_t(MemoryLayout<Int32>.size)) // TCP_KEEPCNT
+            setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCnt, socklen_t(MemoryLayout<Int32>.size))
 
             // 2. Resolve and connect
             var hints = addrinfo()

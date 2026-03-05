@@ -10,8 +10,6 @@ struct MountConfig: Codable, Identifiable, Sendable {
     var mountOnLaunch: Bool
     var options: MountOptions
 
-    var host: String { hostAlias }
-
     private enum CodingKeys: String, CodingKey {
         case id, label, hostAlias, remotePath, localPath, mountOnLaunch, options
     }

@@ -3,22 +3,22 @@ import SwiftUI
 extension MountStatus {
     var color: Color {
         switch self {
-        case .connected: return .green
-        case .connecting, .reconnecting: return .orange
-        case .unreachable: return .yellow
+        case .connected: return SSHMountTheme.success
+        case .connecting, .reconnecting: return SSHMountTheme.warning
+        case .unreachable: return SSHMountTheme.warning
         case .disconnected: return .gray
-        case .error: return .red
+        case .error: return SSHMountTheme.danger
         }
     }
     
     var systemImage: String {
         switch self {
-        case .connected: return "checkmark.circle.fill"
+        case .connected: return "checkmark.circle"
         case .connecting: return "arrow.triangle.2.circlepath"
         case .reconnecting: return "arrow.clockwise"
-        case .unreachable: return "exclamationmark.triangle.fill"
+        case .unreachable: return "exclamationmark.triangle"
         case .disconnected: return "circle"
-        case .error: return "xmark.circle.fill"
+        case .error: return "xmark.circle"
         }
     }
 }
@@ -40,11 +40,11 @@ struct MountListView: View {
         }
         return 340
     }
-    
+
     private func matchesSearch(_ config: MountConfig) -> Bool {
         config.label.localizedCaseInsensitiveContains(searchText) ||
         config.localPath.localizedCaseInsensitiveContains(searchText) ||
-        config.host.localizedCaseInsensitiveContains(searchText)
+        config.hostAlias.localizedCaseInsensitiveContains(searchText)
     }
 
     private var filteredActiveMounts: [MountEntry] {
@@ -108,6 +108,7 @@ struct MountListView: View {
             }
         }
         .frame(width: windowWidth)
+        .sshMountCanvas()
         .animation(.viewTransition, value: showOnboarding)
         .animation(.viewTransition, value: showNewMount)
         .animation(.viewTransition, value: editingConfig?.id)
@@ -116,36 +117,53 @@ struct MountListView: View {
     
     private var mountList: some View {
         VStack(alignment: .leading, spacing: 0) {
+            headerView
             searchBar
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-            
-            Divider()
-            
+
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: SSHMountTheme.sectionSpacing) {
                     sectionActive
-                    sectionDivider
                     sectionSaved
                 }
+                .padding(.horizontal, SSHMountTheme.outerPadding)
+                .padding(.vertical, SSHMountTheme.innerPadding)
             }
             .frame(maxHeight: 400)
-            
-            Divider()
-            
+
             footerView
         }
+    }
+
+    private var headerView: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("SSHMount")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("\(manager.mounts.count) active · \(manager.savedConfigs.count) saved")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if !manager.permissionStatus.allGood {
+                SSHMountBadge(title: "Setup")
+            }
+        }
+        .padding(.horizontal, SSHMountTheme.outerPadding)
+        .padding(.top, SSHMountTheme.outerPadding)
+        .padding(.bottom, SSHMountTheme.innerPadding)
     }
     
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-                .font(.system(size: 13))
+                .font(.system(size: 13, weight: .medium))
             
             TextField("Filter connections", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .font(.system(size: 13, weight: .medium))
             
             if !searchText.isEmpty {
                 Button {
@@ -158,50 +176,51 @@ struct MountListView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, SSHMountTheme.innerPadding)
+        .frame(minHeight: SSHMountTheme.controlHeight)
+        .sshMountSurface()
+        .padding(.horizontal, SSHMountTheme.outerPadding)
+        .padding(.bottom, SSHMountTheme.innerPadding)
     }
     
     @ViewBuilder
     private var sectionActive: some View {
-        sectionHeader(
-            title: "Active",
-            icon: "bolt.fill",
-            iconColor: .yellow,
-            count: filteredActiveMounts.count,
-            isExpanded: $activeSectionExpanded,
-            trailing: {
-                if !filteredActiveMounts.isEmpty {
-                    Button {
-                        Task { await manager.unmountAll() }
-                    } label: {
-                        Image(systemName: "eject.fill")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help("Unmount all")
-                }
-            }
-        )
-        
-        if activeSectionExpanded {
-            if filteredActiveMounts.isEmpty {
-                emptyStateView(message: "No active mounts", icon: "externaldrive.badge.minus")
-            } else {
-                ForEach(filteredActiveMounts) { entry in
-                    ConnectionRow(
-                        label: entry.config.label,
-                        subtitle: abbreviateHome(entry.config.localPath),
-                        host: entry.config.host,
-                        status: entry.status,
-                        connectedSince: entry.connectedSince,
-                        actions: {
-                            connectionActions(for: entry)
+        VStack(alignment: .leading, spacing: SSHMountTheme.compactSpacing) {
+            sectionHeader(
+                title: "Active",
+                icon: "bolt.fill",
+                iconColor: .secondary,
+                count: filteredActiveMounts.count,
+                isExpanded: $activeSectionExpanded,
+                trailing: {
+                    if !filteredActiveMounts.isEmpty {
+                        Button {
+                            Task { await manager.unmountAll() }
+                        } label: {
+                            Image(systemName: "eject.fill")
+                                .font(.system(size: 11, weight: .semibold))
                         }
-                    )
+                        .buttonStyle(SSHMountIconButtonStyle(layout: .square))
+                        .help("Unmount all")
+                    }
+                }
+            )
+            if activeSectionExpanded {
+                if filteredActiveMounts.isEmpty {
+                    emptyStateView(message: "No active mounts", icon: "externaldrive.badge.minus")
+                } else {
+                    ForEach(filteredActiveMounts) { entry in
+                        ConnectionRow(
+                            label: entry.config.label,
+                            subtitle: PathUtilities.abbreviateHome(entry.config.localPath),
+                            host: entry.config.hostAlias,
+                            status: entry.status,
+                            connectedSince: entry.connectedSince,
+                            actions: {
+                                connectionActions(for: entry)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -210,55 +229,49 @@ struct MountListView: View {
     @ViewBuilder
     private var sectionSaved: some View {
         let configs = filteredInactiveConfigs
-        sectionHeader(
-            title: "Saved",
-            icon: "bookmark.fill",
-            iconColor: .blue,
-            count: configs.count,
-            isExpanded: $savedSectionExpanded,
-            trailing: {
-                Button {
-                    withAnimation(.viewTransition) {
-                        showNewMount = true
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Add new connection")
-            }
-        )
-
-        if savedSectionExpanded {
-            if configs.isEmpty {
-                emptyStateView(
-                    message: searchText.isEmpty ? "No saved connections" : "No matches found",
-                    icon: searchText.isEmpty ? "bookmark" : "magnifyingglass"
-                )
-            } else {
-                ForEach(configs) { config in
-                    ConnectionRow(
-                        label: config.label,
-                        subtitle: abbreviateHome(config.localPath),
-                        host: config.host,
-                        status: .disconnected,
-                        connectedSince: nil,
-                        actions: {
-                            savedConnectionActions(for: config)
+        VStack(alignment: .leading, spacing: SSHMountTheme.compactSpacing) {
+            sectionHeader(
+                title: "Saved",
+                icon: "bookmark.fill",
+                iconColor: .secondary,
+                count: configs.count,
+                isExpanded: $savedSectionExpanded,
+                trailing: {
+                    Button {
+                        withAnimation(.viewTransition) {
+                            showNewMount = true
                         }
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(SSHMountIconButtonStyle(layout: .square))
+                    .help("Add new connection")
+                }
+            )
+            if savedSectionExpanded {
+                if configs.isEmpty {
+                    emptyStateView(
+                        message: searchText.isEmpty ? "No saved connections" : "No matches found",
+                        icon: searchText.isEmpty ? "bookmark" : "magnifyingglass"
                     )
+                } else {
+                    ForEach(configs) { config in
+                        ConnectionRow(
+                            label: config.label,
+                            subtitle: nil,
+                            host: config.hostAlias,
+                            status: .disconnected,
+                            connectedSince: nil,
+                            compactLayout: true,
+                            actions: {
+                                savedConnectionActions(for: config)
+                            }
+                        )
+                    }
                 }
             }
         }
-    }
-    
-    private var sectionDivider: some View {
-        Rectangle()
-            .fill(Color(nsColor: .separatorColor))
-            .frame(height: 1)
-            .padding(.horizontal, 12)
     }
     
     private func sectionHeader(
@@ -275,14 +288,14 @@ struct MountListView: View {
                     isExpanded.wrappedValue.toggle()
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 8)
+                        .frame(width: 10)
                     
                     Image(systemName: icon)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(iconColor)
                     
                     Text(title)
@@ -290,13 +303,7 @@ struct MountListView: View {
                         .foregroundStyle(.primary)
                     
                     if count > 0 {
-                        Text("\(count)")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color(nsColor: .controlBackgroundColor))
-                            .clipShape(Capsule())
+                        SSHMountBadge(title: "\(count)")
                     }
                 }
             }
@@ -306,24 +313,24 @@ struct MountListView: View {
             
             trailing()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
     }
     
     private func emptyStateView(message: String, icon: String) -> some View {
         HStack {
             Spacer()
-            VStack(spacing: 4) {
+            VStack(spacing: SSHMountTheme.compactSpacing) {
                 Image(systemName: icon)
-                    .font(.system(size: 20))
+                    .font(.system(size: 18))
                     .foregroundStyle(.tertiary)
                 Text(message)
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
-            .padding(.vertical, 16)
+            .padding(.vertical, 14)
             Spacer()
         }
+        .frame(maxWidth: .infinity)
+        .sshMountSurface(SSHMountTheme.surfaceSoft)
     }
     
     @ViewBuilder
@@ -333,30 +340,27 @@ struct MountListView: View {
                 openInFinder(path: entry.config.localPath)
             } label: {
                 Image(systemName: "folder")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(SSHMountIconButtonStyle(layout: .square))
             .help("Open in Finder")
             
             Button {
                 openTerminal(at: entry.config.localPath)
             } label: {
                 Image(systemName: "terminal")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(SSHMountIconButtonStyle(layout: .square))
             .help("Open in Terminal")
             
             Button {
                 Task { await manager.unmount(entry) }
             } label: {
                 Image(systemName: "eject")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(SSHMountIconButtonStyle(layout: .square))
             .help("Unmount")
         }
     }
@@ -374,10 +378,9 @@ struct MountListView: View {
             }
         } label: {
             Image(systemName: "play.fill")
-                .font(.system(size: 10))
+                .font(.system(size: 10, weight: .semibold))
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.green)
+        .buttonStyle(SSHMountIconButtonStyle(layout: .square))
         .help("Mount")
         
         Button {
@@ -386,33 +389,30 @@ struct MountListView: View {
             }
         } label: {
             Image(systemName: "pencil")
-                .font(.system(size: 10))
+                .font(.system(size: 10, weight: .semibold))
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
+        .buttonStyle(SSHMountIconButtonStyle(layout: .square))
         .help("Edit")
         
         Button {
             manager.deleteConfig(config)
         } label: {
             Image(systemName: "trash")
-                .font(.system(size: 10))
+                .font(.system(size: 10, weight: .semibold))
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
+        .buttonStyle(SSHMountIconButtonStyle(layout: .square))
         .help("Delete")
     }
     
     private var footerView: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 10) {
             Button {
                 openSSHConfig()
             } label: {
                 Label("SSH Config", systemImage: "doc.text")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(SSHMountIconButtonStyle())
             
             Spacer()
             
@@ -421,10 +421,9 @@ struct MountListView: View {
                     showOnboarding = true
                 } label: {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.orange)
+                        .font(.system(size: 11, weight: .semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SSHMountIconButtonStyle(layout: .square))
                 .help("Setup issues")
             }
             
@@ -435,13 +434,12 @@ struct MountListView: View {
                 }
             } label: {
                 Label("Quit", systemImage: "power")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(SSHMountIconButtonStyle())
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, SSHMountTheme.outerPadding)
+        .padding(.vertical, SSHMountTheme.innerPadding)
     }
 }
 
@@ -453,6 +451,7 @@ struct ConnectionRow<Actions: View>: View {
     let host: String?
     let status: MountStatus
     var connectedSince: Date?
+    var compactLayout = false
     @ViewBuilder let actions: () -> Actions
 
     private var shouldPulse: Bool {
@@ -476,54 +475,56 @@ struct ConnectionRow<Actions: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: SSHMountTheme.innerPadding) {
             Image(systemName: status.systemImage)
-                .font(.system(size: 14))
+                .font(.system(size: compactLayout ? 12 : 13, weight: .medium))
                 .foregroundStyle(status.color)
                 .symbolEffect(.pulse, isActive: shouldPulse)
-                .frame(width: 20)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                
-                if showStatusText {
-                    HStack(spacing: 4) {
+                .frame(width: 16, height: 16)
+
+            VStack(alignment: .leading, spacing: compactLayout ? 2 : 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(label)
+                        .font(.system(size: compactLayout ? 12 : 13, weight: .semibold))
+                        .lineLimit(1)
+
+                    if showStatusText {
                         Text(status.text)
-                            .font(.system(size: 11))
-                            .foregroundStyle(status.color)
-                        
-                        if let subtitle {
-                            Text("·")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                            Text(subtitle)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    
-                    if let connectedSince, status == .connected {
-                        Text(connectedSince, style: .relative)
                             .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(status.color)
                     }
-                } else if let subtitle {
+                }
+
+                if let host {
+                    Text(host)
+                        .font(.system(size: compactLayout ? 11 : 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                if let subtitle, !compactLayout {
                     Text(subtitle)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+
+                if let connectedSince, status == .connected {
+                    Text("Connected \(connectedSince, style: .relative) ago")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
             }
-            
-            Spacer()
-            
-            actions()
+
+            Spacer(minLength: compactLayout ? SSHMountTheme.compactSpacing : SSHMountTheme.innerPadding)
+
+            HStack(spacing: compactLayout ? 4 : 6) {
+                actions()
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, SSHMountTheme.innerPadding)
+        .padding(.vertical, compactLayout ? 6 : 8)
+        .sshMountSurface(SSHMountTheme.surfaceSoft)
         .contentShape(Rectangle())
         .help(tooltipText)
         .accessibilityElement(children: .ignore)
@@ -558,11 +559,6 @@ private func openTerminal(at path: String) {
 /// showing the same path, and only brings that window to front.
 private func openInFinder(path: String) {
     NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
-}
-
-/// Replace the user's home directory prefix with ~
-private func abbreviateHome(_ path: String) -> String {
-    PathUtilities.abbreviateHome(path)
 }
 
 /// Open ~/.ssh/config in the default editor, creating it if needed.

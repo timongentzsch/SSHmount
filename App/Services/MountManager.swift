@@ -31,9 +31,9 @@ enum AggregateConnectionStatus {
     var color: Color {
         switch self {
         case .noMounts:     .secondary
-        case .allConnected: .green
-        case .degraded:     .orange
-        case .hasErrors:    .red
+        case .allConnected: SSHMountTheme.success
+        case .degraded:     SSHMountTheme.warning
+        case .hasErrors:    SSHMountTheme.danger
         case .mixed:        .blue
         }
     }
@@ -52,6 +52,31 @@ enum AggregateConnectionStatus {
 /// The app never probes the filesystem or monitors the network.
 @MainActor
 final class MountManager: ObservableObject {
+    private struct MountTableSnapshot {
+        let systemMounts: [ActiveMount]
+        let systemPaths: Set<String>
+
+        init(systemMounts: [ActiveMount]) {
+            self.systemMounts = systemMounts
+            self.systemPaths = Set(systemMounts.map(\.localPath))
+        }
+    }
+
+    private static let connectedNotification = "com.sshmount.state.connected"
+    private static let reconnectingNotification = "com.sshmount.state.reconnecting"
+    private static let reconnectDelayNotificationPrefix = "com.sshmount.reconnect.delay."
+    private static let reconnectReasonNotificationPrefix = "com.sshmount.reconnect.reason."
+    private static let reconnectReasons = [
+        "probe_timeout",
+        "transport_error",
+        "worker_exhausted",
+        "manual_trigger",
+    ]
+    private static let reconnectDelaySteps = [2, 4, 8, 16]
+    private static let healthyPollInterval: TimeInterval = 30
+    private static let unhealthyPollInterval: TimeInterval = 5
+    private static let permissionRefreshInterval: TimeInterval = 300
+
     @Published var mounts: [MountEntry] = []
     @Published var savedConfigs: [MountConfig] = []
     @Published var permissionStatus = PermissionStatus()
@@ -147,10 +172,10 @@ final class MountManager: ObservableObject {
             )
             resolvedConfig.localPath = mountPoint
             if let idx = mounts.firstIndex(where: { $0.id == entry.id }) {
+                let now = Date()
                 withAnimation(.mountTransition) {
                     mounts[idx].config = resolvedConfig
-                    mounts[idx].status = .connected
-                    mounts[idx].connectedSince = Date()
+                    markConnected(&mounts[idx], connectedSince: now, overwriteTimestamp: true)
                 }
             }
             return .success
@@ -226,84 +251,65 @@ final class MountManager: ObservableObject {
 
     /// Listen for Darwin notifications from the extension.
     private func startExtensionStateListeners() {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        guard let center = CFNotificationCenterGetDarwinNotifyCenter() else { return }
         let observer = Unmanaged.passUnretained(self).toOpaque()
 
-        // State notifications
-        let stateNames: [CFString] = [
-            "com.sshmount.state.connected" as CFString,
-            "com.sshmount.state.reconnecting" as CFString,
-        ]
-        for name in stateNames {
-            CFNotificationCenterAddObserver(
-                center,
-                observer,
-                { (_, rawObserver, notificationName, _, _) in
-                    guard let rawObserver, let notificationName else { return }
-                    let manager = Unmanaged<MountManager>.fromOpaque(rawObserver).takeUnretainedValue()
-                    let isConnected = (notificationName.rawValue as String) == "com.sshmount.state.connected"
-                    Task { @MainActor in
-                        let status: MountStatus = isConnected ? .connected : .reconnecting
-                        Log.app.notice("Extension state: \(isConnected ? "connected" : "reconnecting", privacy: .public)")
-                        manager.applyExtensionState(status)
-                    }
-                },
-                name,
-                nil,
-                .deliverImmediately
-            )
+        for name in [Self.connectedNotification, Self.reconnectingNotification] {
+            addDarwinObserver(center: center, observer: observer, name: name as CFString)
         }
 
-        // Reconnect delay notifications (tells us when next attempt will fire)
-        let delays: [Int] = [2, 4, 8, 16]
-        for delay in delays {
-            let name = "com.sshmount.reconnect.delay.\(delay)" as CFString
-            CFNotificationCenterAddObserver(
-                center,
-                observer,
-                { (_, rawObserver, notificationName, _, _) in
-                    guard let rawObserver, let notificationName else { return }
-                    let manager = Unmanaged<MountManager>.fromOpaque(rawObserver).takeUnretainedValue()
-                    let nameStr = notificationName.rawValue as String
-                    let delayStr = nameStr.replacingOccurrences(of: "com.sshmount.reconnect.delay.", with: "")
-                    let delaySec = Double(delayStr) ?? 2
-                    Task { @MainActor in
-                        manager.applyRetryScheduled(delay: delaySec)
-                    }
-                },
-                name,
-                nil,
-                .deliverImmediately
-            )
+        for delay in Self.reconnectDelaySteps {
+            let name = "\(Self.reconnectDelayNotificationPrefix)\(delay)"
+            addDarwinObserver(center: center, observer: observer, name: name as CFString)
         }
 
-        let reconnectReasons = [
-            "probe_timeout",
-            "transport_error",
-            "worker_exhausted",
-            "manual_trigger",
-        ]
-        for reason in reconnectReasons {
-            let name = "com.sshmount.reconnect.reason.\(reason)" as CFString
-            CFNotificationCenterAddObserver(
-                center,
-                observer,
-                { (_, rawObserver, notificationName, _, _) in
-                    guard let rawObserver, let notificationName else { return }
-                    let manager = Unmanaged<MountManager>.fromOpaque(rawObserver).takeUnretainedValue()
-                    let nameStr = notificationName.rawValue as String
-                    let raw = nameStr.replacingOccurrences(of: "com.sshmount.reconnect.reason.", with: "")
-                    Task { @MainActor in
-                        manager.applyReconnectReason(raw)
-                    }
-                },
-                name,
-                nil,
-                .deliverImmediately
-            )
+        for reason in Self.reconnectReasons {
+            let name = "\(Self.reconnectReasonNotificationPrefix)\(reason)"
+            addDarwinObserver(center: center, observer: observer, name: name as CFString)
         }
 
         observingExtensionState = true
+    }
+
+    private func handleDarwinNotification(named notificationName: String) {
+        switch notificationName {
+        case Self.connectedNotification:
+            Log.app.notice("Extension state: connected")
+            applyExtensionState(.connected)
+        case Self.reconnectingNotification:
+            Log.app.notice("Extension state: reconnecting")
+            applyExtensionState(.reconnecting)
+        case let name where name.hasPrefix(Self.reconnectDelayNotificationPrefix):
+            let value = name.replacingOccurrences(of: Self.reconnectDelayNotificationPrefix, with: "")
+            applyRetryScheduled(delay: Double(value) ?? Double(Self.reconnectDelaySteps.first ?? 2))
+        case let name where name.hasPrefix(Self.reconnectReasonNotificationPrefix):
+            let raw = name.replacingOccurrences(of: Self.reconnectReasonNotificationPrefix, with: "")
+            applyReconnectReason(raw)
+        default:
+            break
+        }
+    }
+
+    private func addDarwinObserver(
+        center: CFNotificationCenter,
+        observer: UnsafeMutableRawPointer,
+        name: CFString
+    ) {
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { _, rawObserver, notificationName, _, _ in
+                guard let rawObserver, let notificationName else { return }
+                let manager = Unmanaged<MountManager>.fromOpaque(rawObserver).takeUnretainedValue()
+                let notificationNameString = notificationName.rawValue as String
+                Task { @MainActor in
+                    manager.handleDarwinNotification(named: notificationNameString)
+                }
+            },
+            name,
+            nil,
+            .deliverImmediately
+        )
     }
 
     /// Apply extension-reported state to all tracked mounts.
@@ -311,17 +317,12 @@ final class MountManager: ObservableObject {
     /// Applies to every mount except `.connecting` (in-progress mount requests).
     /// This ensures Darwin notifications can unstick any state, including `.error`.
     private func applyExtensionState(_ status: MountStatus) {
-        withAnimation(.mountTransition) {
-            for i in mounts.indices where mounts[i].status != .connecting {
-                if status == .connected && mounts[i].status != .connected {
-                    mounts[i].connectedSince = Date()
-                    mounts[i].retryAttempt = 0
-                    mounts[i].retryNextAt = nil
-                    mounts[i].lastReconnectReason = nil
-                } else if status != .connected {
-                    mounts[i].connectedSince = nil
-                }
-                mounts[i].status = status
+        let now = Date()
+        updateMounts(matching: { $0.status != .connecting }) { entry in
+            if status == .connected && entry.status != .connected {
+                markConnected(&entry, connectedSince: now, overwriteTimestamp: true)
+            } else {
+                markStatus(status, for: &entry)
             }
         }
     }
@@ -331,20 +332,20 @@ final class MountManager: ObservableObject {
             .split(separator: "_")
             .map { $0.capitalized }
             .joined(separator: " ")
-        withAnimation(.viewTransition) {
-            for i in mounts.indices where mounts[i].status == .reconnecting || mounts[i].status == .unreachable {
-                mounts[i].lastReconnectReason = readable
-            }
+        updateMounts(
+            matching: { $0.status == .reconnecting || $0.status == .unreachable },
+            animation: .viewTransition
+        ) { entry in
+            entry.lastReconnectReason = readable
         }
     }
 
     /// Extension scheduled a reconnect attempt in `delay` seconds.
     private func applyRetryScheduled(delay: Double) {
-        withAnimation(.mountTransition) {
-            for i in mounts.indices where mounts[i].status == .reconnecting {
-                mounts[i].retryAttempt += 1
-                mounts[i].retryNextAt = Date().addingTimeInterval(delay)
-            }
+        let nextRetryAt = Date().addingTimeInterval(delay)
+        updateMounts(matching: { $0.status == .reconnecting }) { entry in
+            entry.retryAttempt += 1
+            entry.retryNextAt = nextRetryAt
         }
     }
 
@@ -378,11 +379,8 @@ final class MountManager: ObservableObject {
     }
 
     private func markAllUnreachable() {
-        withAnimation(.mountTransition) {
-            for i in mounts.indices where mounts[i].status == .connected || mounts[i].status == .reconnecting {
-                mounts[i].status = .unreachable
-                mounts[i].connectedSince = nil
-            }
+        updateMounts(matching: { $0.status == .connected || $0.status == .reconnecting }) { entry in
+            markStatus(.unreachable, for: &entry)
         }
     }
 
@@ -393,20 +391,21 @@ final class MountManager: ObservableObject {
         mounts.contains { $0.status != .connected && $0.status != .connecting }
     }
 
+    private var pollInterval: TimeInterval {
+        hasUnhealthyMounts ? Self.unhealthyPollInterval : Self.healthyPollInterval
+    }
+
     private func startMountTablePolling() {
         pollTask = Task { [weak self] in
-            var ticksSincePermissionCheck = 0
+            var elapsedSincePermissionCheck: TimeInterval = 0
             while !Task.isCancelled {
-                // Poll faster (5s) when something is wrong, normal (30s) when all good.
-                let interval: TimeInterval = await self?.hasUnhealthyMounts == true ? 5 : 30
+                let interval = self?.pollInterval ?? Self.healthyPollInterval
                 try? await Task.sleep(for: .seconds(interval))
                 guard !Task.isCancelled else { break }
                 await self?.reconcileMountTable()
-                // Permission status rarely changes; check every ~5 minutes.
-                ticksSincePermissionCheck += 1
-                let permissionInterval = interval < 10 ? 60 : 10 // ~5min at 5s, ~5min at 30s
-                if ticksSincePermissionCheck >= permissionInterval {
-                    ticksSincePermissionCheck = 0
+                elapsedSincePermissionCheck += interval
+                if elapsedSincePermissionCheck >= Self.permissionRefreshInterval {
+                    elapsedSincePermissionCheck = 0
                     await self?.refreshPermissions()
                 }
             }
@@ -422,70 +421,96 @@ final class MountManager: ObservableObject {
     /// 3. **Discover** externally-created mounts (e.g. from CLI).
     private func reconcileMountTable() async {
         let systemMounts = await ExtensionBridge.shared.activeMounts()
-        let systemPaths = Set(systemMounts.map(\.localPath))
+        let snapshot = MountTableSnapshot(systemMounts: systemMounts)
 
-        // 1. Remove tracked mounts gone from kernel (skip in-progress mounts).
-        let gone = mounts.filter { $0.status != .connecting && !systemPaths.contains($0.config.localPath) }
-        if !gone.isEmpty {
-            for entry in gone {
-                Log.app.notice("Mount gone from kernel: \(entry.config.localPath, privacy: .public) (was \(entry.status.text, privacy: .public))")
-            }
-            withAnimation(.mountTransition) {
-                mounts.removeAll { $0.status != .connecting && !systemPaths.contains($0.config.localPath) }
-            }
+        removeTrackedMountsMissingFromKernel(using: snapshot)
+        healTrackedMountsPresentInKernel(using: snapshot)
+        discoverExternalMounts(using: snapshot)
+    }
+
+    private func removeTrackedMountsMissingFromKernel(using snapshot: MountTableSnapshot) {
+        let missing = mounts.filter { $0.status != .connecting && !snapshot.systemPaths.contains($0.config.localPath) }
+        guard !missing.isEmpty else { return }
+
+        for entry in missing {
+            Log.app.notice("Mount gone from kernel: \(entry.config.localPath, privacy: .public) (was \(entry.status.text, privacy: .public))")
         }
 
-        // 2. Heal any stale state → .connected when kernel confirms mount exists.
+        withAnimation(.mountTransition) {
+            mounts.removeAll { $0.status != .connecting && !snapshot.systemPaths.contains($0.config.localPath) }
+        }
+    }
+
+    private func healTrackedMountsPresentInKernel(using snapshot: MountTableSnapshot) {
         let staleIndices = mounts.indices.filter {
-            let s = self.mounts[$0].status
-            return s != .connecting && s != .connected && systemPaths.contains(self.mounts[$0].config.localPath)
+            let status = mounts[$0].status
+            return status != .connecting
+                && status != .connected
+                && snapshot.systemPaths.contains(mounts[$0].config.localPath)
         }
-        if !staleIndices.isEmpty {
-            withAnimation(.mountTransition) {
-                for idx in staleIndices {
-                    Log.app.notice("Healing \(self.mounts[idx].status.text, privacy: .public) → connected: \(self.mounts[idx].config.localPath, privacy: .public)")
-                    self.mounts[idx].status = .connected
-                    if self.mounts[idx].connectedSince == nil {
-                        self.mounts[idx].connectedSince = Date()
-                    }
-                    self.mounts[idx].retryAttempt = 0
-                    self.mounts[idx].retryNextAt = nil
-                    self.mounts[idx].lastReconnectReason = nil
-                }
+        guard !staleIndices.isEmpty else { return }
+
+        let now = Date()
+        withAnimation(.mountTransition) {
+            for index in staleIndices {
+                Log.app.notice("Healing \(self.mounts[index].status.text, privacy: .public) → connected: \(self.mounts[index].config.localPath, privacy: .public)")
+                self.markConnected(&self.mounts[index], connectedSince: now, overwriteTimestamp: false)
+            }
+        }
+    }
+
+    private func discoverExternalMounts(using snapshot: MountTableSnapshot) {
+        let newEntries = snapshot.systemMounts
+            .filter { mount in !mounts.contains(where: { $0.config.localPath == mount.localPath }) }
+            .map { mount in
+                (
+                    mount: mount,
+                    entry: MountEntry(
+                        config: makeTrackedConfig(for: mount),
+                        status: .connected,
+                        connectedSince: Date()
+                    )
+                )
+            }
+        guard !newEntries.isEmpty else { return }
+
+        withAnimation(.mountTransition) {
+            for newEntry in newEntries {
+                mounts.append(newEntry.entry)
             }
         }
 
-        // 3. Pick up externally-created mounts (e.g. from CLI).
-        let trackedPaths = Set(mounts.map(\.config.localPath))
-        for mount in systemMounts {
-            if !trackedPaths.contains(mount.localPath) {
-                let matchedConfig = savedConfigs.first { config in
-                    if config.localPath.isEmpty {
-                        return config.hostAlias == (mount.remote.host ?? "")
-                    }
-                    let expanded = PathUtilities.expandTilde(config.localPath)
-                    return expanded == mount.localPath
-                }
-                let config = matchedConfig.map { saved in
-                    MountConfig(
-                        id: saved.id,
-                        label: saved.label,
-                        hostAlias: saved.hostAlias,
-                        remotePath: saved.remotePath,
-                        localPath: mount.localPath,
-                        mountOnLaunch: saved.mountOnLaunch,
-                        options: saved.options
-                    )
-                } ?? MountConfig(
-                    hostAlias: mount.remote.host ?? "unknown",
-                    remotePath: mount.remote.path,
-                    localPath: mount.localPath
-                )
-                withAnimation(.mountTransition) {
-                    mounts.append(MountEntry(config: config, status: .connected, connectedSince: Date()))
-                }
-                Log.app.notice("External mount picked up as connected: \(mount.localPath, privacy: .public)")
+        for newEntry in newEntries {
+            Log.app.notice("External mount picked up as connected: \(newEntry.mount.localPath, privacy: .public)")
+        }
+    }
+
+    private func makeTrackedConfig(for mount: ActiveMount) -> MountConfig {
+        guard let saved = matchingSavedConfig(for: mount) else {
+            return MountConfig(
+                hostAlias: mount.remote.host ?? "unknown",
+                remotePath: mount.remote.path,
+                localPath: mount.localPath
+            )
+        }
+
+        return MountConfig(
+            id: saved.id,
+            label: saved.label,
+            hostAlias: saved.hostAlias,
+            remotePath: saved.remotePath,
+            localPath: mount.localPath,
+            mountOnLaunch: saved.mountOnLaunch,
+            options: saved.options
+        )
+    }
+
+    private func matchingSavedConfig(for mount: ActiveMount) -> MountConfig? {
+        savedConfigs.first { config in
+            if config.localPath.isEmpty {
+                return config.hostAlias == (mount.remote.host ?? "")
             }
+            return PathUtilities.expandTilde(config.localPath) == mount.localPath
         }
     }
 
@@ -587,6 +612,42 @@ final class MountManager: ObservableObject {
             extensionEnabled: enabled,
             sshKeysFound: hasKeys
         )
+    }
+
+    private func updateMounts(
+        matching predicate: (MountEntry) -> Bool,
+        animation: Animation = .mountTransition,
+        _ update: (inout MountEntry) -> Void
+    ) {
+        let indices = mounts.indices.filter { predicate(mounts[$0]) }
+        guard !indices.isEmpty else { return }
+
+        withAnimation(animation) {
+            for index in indices {
+                update(&mounts[index])
+            }
+        }
+    }
+
+    private func resetReconnectMetadata(for entry: inout MountEntry) {
+        entry.retryAttempt = 0
+        entry.retryNextAt = nil
+        entry.lastReconnectReason = nil
+    }
+
+    private func markConnected(_ entry: inout MountEntry, connectedSince: Date, overwriteTimestamp: Bool) {
+        entry.status = .connected
+        if overwriteTimestamp || entry.connectedSince == nil {
+            entry.connectedSince = connectedSince
+        }
+        resetReconnectMetadata(for: &entry)
+    }
+
+    private func markStatus(_ status: MountStatus, for entry: inout MountEntry) {
+        entry.status = status
+        if status != .connected {
+            entry.connectedSince = nil
+        }
     }
 }
 

@@ -120,6 +120,7 @@ final class SSHMountVolume: FSVolume,
         self.pendingOperationSemaphore = DispatchSemaphore(
             value: Self.pendingOperationLimit(for: options.profile)
         )
+        self.allWorkers = readWorkers + writeWorkers
         self.healthMonitor = healthMonitor
         super.init(volumeID: volumeID, volumeName: volumeName)
         setupHealthMonitor()
@@ -271,13 +272,32 @@ final class SSHMountVolume: FSVolume,
         }
     }
 
-    private var allWorkers: [IOWorker] { readWorkers + writeWorkers }
+    private let allWorkers: [IOWorker]
     private var reconnectWaitTimeout: TimeInterval {
         max(15, mountOptions.healthTimeout * Double(mountOptions.healthFailures + 1))
     }
 
-    private func reconnectIOSessions() {
+    private func forEachWorker(_ body: (IOWorker) -> Void) {
         for worker in allWorkers {
+            body(worker)
+        }
+    }
+
+    private func forEachSessionSync(_ body: (SFTPSession) throws -> Void) throws {
+        try body(sftp)
+        try forEachWorkerSync(body)
+    }
+
+    private func forEachWorkerSync(_ body: (SFTPSession) throws -> Void) throws {
+        for worker in allWorkers {
+            try worker.queue.sync {
+                try body(worker.sftp)
+            }
+        }
+    }
+
+    private func reconnectIOSessions() {
+        forEachWorker { worker in
             worker.queue.async {
                 worker.sftp.releaseAllHandles()
                 do {
@@ -290,29 +310,20 @@ final class SSHMountVolume: FSVolume,
     }
 
     private func releaseHandleAcrossSessions(path: String) {
-        sftp.releaseHandle(path: path)
-        for worker in allWorkers {
-            worker.queue.sync {
-                worker.sftp.releaseHandle(path: path)
-            }
+        try? forEachSessionSync { session in
+            session.releaseHandle(path: path)
         }
     }
 
     private func syncPathAcrossSessions(path: String) throws {
-        try sftp.syncHandle(path: path)
-        for worker in allWorkers {
-            try worker.queue.sync {
-                try worker.sftp.syncHandle(path: path)
-            }
+        try forEachSessionSync { session in
+            try session.syncHandle(path: path)
         }
     }
 
     private func syncAllWriteHandlesAcrossSessions() throws {
-        try sftp.syncAllWriteHandles()
-        for worker in allWorkers {
-            try worker.queue.sync {
-                try worker.sftp.syncAllWriteHandles()
-            }
+        try forEachSessionSync { session in
+            try session.syncAllWriteHandles()
         }
     }
 
@@ -325,7 +336,7 @@ final class SSHMountVolume: FSVolume,
         isShutdown = true
         shutdownLock.unlock()
 
-        for worker in allWorkers {
+        forEachWorker { worker in
             worker.queue.sync {
                 worker.sftp.disconnect()
             }
@@ -906,16 +917,24 @@ final class SSHMountVolume: FSVolume,
         enqueueSFTPOperation(onTimeout: {
             reply(POSIXError(.EAGAIN))
         }) {
+            var closeError: Error?
             do {
                 if self.mountOptions.profile == .git {
                     try self.syncPathAcrossSessions(path: itemPath)
                 }
-                self.releaseHandleAcrossSessions(path: itemPath)
-                reply(nil)
             } catch {
-                Log.volume.notice("closeItem failed for \(itemPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                reply(POSIXError(Self.posixCode(from: error)))
+                closeError = error
             }
+
+            self.releaseHandleAcrossSessions(path: itemPath)
+
+            if let closeError {
+                Log.volume.notice("closeItem failed for \(itemPath, privacy: .public): \(closeError.localizedDescription, privacy: .public)")
+                reply(POSIXError(Self.posixCode(from: closeError)))
+                return
+            }
+
+            reply(nil)
         }
     }
 
