@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 /// Manages all mount state and coordinates with the FSKit extension.
 ///
@@ -9,8 +10,9 @@ import SwiftUI
 ///
 /// The extension performs configurable SSH health checks and is the sole source of truth.
 /// The app never probes the filesystem or monitors the network.
+@Observable
 @MainActor
-final class MountManager: ObservableObject {
+final class MountManager {
     private struct MountTableSnapshot {
         let systemMounts: [ActiveMount]
         let systemPaths: Set<String>
@@ -36,7 +38,7 @@ final class MountManager: ObservableObject {
     private static let unhealthyPollInterval: TimeInterval = 5
     private static let permissionRefreshInterval: TimeInterval = 300
 
-    @Published var mounts: [MountEntry] = []
+    var mounts: [MountEntry] = []
 
     let configStore = MountConfigStore()
     let permissionChecker = PermissionChecker()
@@ -48,10 +50,10 @@ final class MountManager: ObservableObject {
 
     var permissionStatus: PermissionStatus { permissionChecker.status }
 
-    private var pollTask: Task<Void, Never>?
-    private nonisolated(unsafe) var sleepObserver: NSObjectProtocol?
-    private nonisolated(unsafe) var wakeObserver: NSObjectProtocol?
-    private nonisolated(unsafe) var observingExtensionState = false
+    @ObservationIgnored private nonisolated(unsafe) var pollTask: Task<Void, Never>?
+    @ObservationIgnored private nonisolated(unsafe) var sleepObserver: NSObjectProtocol?
+    @ObservationIgnored private nonisolated(unsafe) var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private nonisolated(unsafe) var observingExtensionState = false
 
     var aggregateStatus: AggregateConnectionStatus {
         guard !mounts.isEmpty else { return .noMounts }

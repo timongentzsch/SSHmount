@@ -1,11 +1,13 @@
 import Foundation
+import Observation
 
 /// Persistence layer for saved mount configurations.
+@Observable
 @MainActor
-final class MountConfigStore: ObservableObject {
-    @Published var savedConfigs: [MountConfig] = []
+final class MountConfigStore {
+    var savedConfigs: [MountConfig] = []
 
-    private let configURL: URL = {
+    @ObservationIgnored private let configURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = appSupport.appendingPathComponent("SSHMount", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

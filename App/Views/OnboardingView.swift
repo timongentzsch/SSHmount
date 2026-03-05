@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct OnboardingView: View {
-    @ObservedObject var manager: MountManager
+    var manager: MountManager
     var onDismiss: () -> Void
 
     var body: some View {

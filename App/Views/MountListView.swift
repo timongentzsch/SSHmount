@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MountListView: View {
-    @ObservedObject var manager: MountManager
+    var manager: MountManager
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @State private var showOnboarding = false
     @State private var showNewMount = false

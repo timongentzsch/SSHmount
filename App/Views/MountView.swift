@@ -1,30 +1,102 @@
 import SwiftUI
+import Observation
+
+@Observable
+final class MountFormModel {
+    private static let defaults = MountOptions.defaultStandard
+
+    var hostAlias = ""
+    var remotePath = ""
+    var localPath = ""
+    var label = ""
+    var mountOnLaunch = false
+
+    var profile = defaults.profile
+    var readWorkers = defaults.readWorkers
+    var writeWorkers = defaults.writeWorkers
+    var ioMode = defaults.ioMode
+    var healthInterval = Int(defaults.healthInterval)
+    var healthTimeout = Int(defaults.healthTimeout)
+    var healthFailures = defaults.healthFailures
+    var busyThreshold = defaults.busyThreshold
+    var graceSeconds = Int(defaults.graceSeconds)
+    var queueTimeoutMs = defaults.queueTimeoutMs
+    var cacheAttrSeconds = Int(defaults.cacheTimeout)
+    var cacheDirSeconds = Int(defaults.dirCacheTimeout)
+
+    func hydrate(from config: MountConfig) {
+        hostAlias = config.hostAlias
+        remotePath = config.remotePath
+
+        let home = PathUtilities.realHomeDirectory
+        let prefix = home + "/Volumes/"
+        if config.localPath.hasPrefix(prefix) {
+            localPath = String(config.localPath.dropFirst(prefix.count))
+        } else {
+            localPath = config.localPath
+        }
+
+        label = config.label
+        mountOnLaunch = config.mountOnLaunch
+
+        let opts = config.options
+        profile = opts.profile
+        readWorkers = opts.readWorkers
+        writeWorkers = opts.writeWorkers
+        ioMode = opts.ioMode
+        healthInterval = Int(opts.healthInterval.rounded())
+        healthTimeout = Int(opts.healthTimeout.rounded())
+        healthFailures = opts.healthFailures
+        busyThreshold = opts.busyThreshold
+        graceSeconds = Int(opts.graceSeconds.rounded())
+        queueTimeoutMs = opts.queueTimeoutMs
+        cacheAttrSeconds = Int(opts.cacheTimeout.rounded())
+        cacheDirSeconds = Int(opts.dirCacheTimeout.rounded())
+
+        if opts.profile == .git {
+            applyGitProfileOverrides()
+        }
+    }
+
+    func applyGitProfileOverrides() {
+        readWorkers = 0
+        writeWorkers = 0
+        ioMode = .blocking
+        cacheAttrSeconds = 0
+        cacheDirSeconds = 0
+        if healthFailures < 7 { healthFailures = 7 }
+        if busyThreshold < 64 { busyThreshold = 64 }
+    }
+
+    func currentOptions() -> MountOptions {
+        MountOptions(
+            profile: profile,
+            readWorkers: readWorkers,
+            writeWorkers: writeWorkers,
+            ioMode: ioMode,
+            healthInterval: TimeInterval(healthInterval),
+            healthTimeout: TimeInterval(healthTimeout),
+            healthFailures: healthFailures,
+            busyThreshold: busyThreshold,
+            graceSeconds: TimeInterval(graceSeconds),
+            queueTimeoutMs: queueTimeoutMs,
+            cacheTimeout: TimeInterval(cacheAttrSeconds),
+            dirCacheTimeout: TimeInterval(cacheDirSeconds),
+            authPassword: nil
+        )
+    }
+
+    var resolvedLocalPath: String {
+        localPath.isEmpty ? "" : "~/Volumes/\(localPath)"
+    }
+}
 
 struct MountView: View {
-    private static let defaultOptions = MountOptions.defaultStandard
-
-    @ObservedObject var manager: MountManager
+    var manager: MountManager
     var onDismiss: () -> Void
     var editing: MountConfig?
 
-    @State private var hostAlias = ""
-    @State private var remotePath = ""
-    @State private var localPath = ""
-    @State private var label = ""
-    @State private var mountOnLaunch = false
-
-    @State private var profile = Self.defaultOptions.profile
-    @State private var readWorkers = Self.defaultOptions.readWorkers
-    @State private var writeWorkers = Self.defaultOptions.writeWorkers
-    @State private var ioMode = Self.defaultOptions.ioMode
-    @State private var healthInterval = Int(Self.defaultOptions.healthInterval)
-    @State private var healthTimeout = Int(Self.defaultOptions.healthTimeout)
-    @State private var healthFailures = Self.defaultOptions.healthFailures
-    @State private var busyThreshold = Self.defaultOptions.busyThreshold
-    @State private var graceSeconds = Int(Self.defaultOptions.graceSeconds)
-    @State private var queueTimeoutMs = Self.defaultOptions.queueTimeoutMs
-    @State private var cacheAttrSeconds = Int(Self.defaultOptions.cacheTimeout)
-    @State private var cacheDirSeconds = Int(Self.defaultOptions.dirCacheTimeout)
+    @State private var form = MountFormModel()
 
     @State private var knownHosts: [String] = []
     @State private var knownHostsDiagnostic: String?
@@ -34,11 +106,11 @@ struct MountView: View {
     @State private var showAdvanced = false
 
     private var hostAliasIsValid: Bool {
-        knownHosts.contains(hostAlias)
+        knownHosts.contains(form.hostAlias)
     }
 
     private var canSubmit: Bool {
-        hostAliasIsValid && !remotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        hostAliasIsValid && !form.remotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var sshConfigPath: String {
@@ -68,7 +140,7 @@ struct MountView: View {
         .sheet(isPresented: $showPasswordPrompt) {
             PasswordPromptView(
                 title: "Authentication Failed",
-                message: "SSH key authentication failed for **\(hostAlias)**. Please enter your password:",
+                message: "SSH key authentication failed for **\(form.hostAlias)**. Please enter your password:",
                 actionLabel: "Connect",
                 onSubmit: { password in
                     showPasswordPrompt = false
@@ -97,9 +169,9 @@ struct MountView: View {
             loadKnownHosts()
             hydrateFromEditingConfig()
         }
-        .onChange(of: profile) { _, newProfile in
+        .onChange(of: form.profile) { _, newProfile in
             if newProfile == .git {
-                applyGitProfileOverrides()
+                form.applyGitProfileOverrides()
             }
         }
     }
@@ -144,17 +216,17 @@ struct MountView: View {
                 } else {
                     Menu {
                         Button("Select a host...") {
-                            hostAlias = ""
+                            form.hostAlias = ""
                         }
                         ForEach(knownHosts, id: \.self) { host in
                             Button(host) {
-                                hostAlias = host
+                                form.hostAlias = host
                             }
                         }
                     } label: {
                         HStack {
-                            Text(hostAlias.isEmpty ? "Select a host..." : hostAlias)
-                                .foregroundStyle(hostAlias.isEmpty ? .secondary : .primary)
+                            Text(form.hostAlias.isEmpty ? "Select a host..." : form.hostAlias)
+                                .foregroundStyle(form.hostAlias.isEmpty ? .secondary : .primary)
                                 .font(.system(size: 13, design: .monospaced))
                             Spacer()
                             Image(systemName: "chevron.down")
@@ -170,7 +242,7 @@ struct MountView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 formField(title: "Remote Path") {
-                    TextField("e.g. ~/project or /var/www", text: $remotePath)
+                    TextField("e.g. ~/project or /var/www", text: $form.remotePath)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13, design: .monospaced))
                 }
@@ -181,14 +253,14 @@ struct MountView: View {
                             .font(.system(size: 13, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .padding(.leading, 2)
-                        TextField("folder name", text: $localPath)
+                        TextField("folder name", text: $form.localPath)
                             .textFieldStyle(.plain)
                             .font(.system(size: 13, design: .monospaced))
                     }
                 }
 
                 formField(title: "Label", detail: "Optional Finder-friendly name") {
-                    TextField("Friendly name", text: $label)
+                    TextField("Friendly name", text: $form.label)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13))
                 }
@@ -198,7 +270,7 @@ struct MountView: View {
                 Label("Mount on app launch", systemImage: "power")
                     .font(.system(size: 13, weight: .medium))
                 Spacer()
-                Toggle("", isOn: $mountOnLaunch)
+                Toggle("", isOn: $form.mountOnLaunch)
                     .labelsHidden()
             }
             .toggleStyle(.switch)
@@ -215,7 +287,7 @@ struct MountView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
 
-                    Picker("Profile", selection: $profile) {
+                    Picker("Profile", selection: $form.profile) {
                         ForEach(MountProfile.allCases, id: \.self) { profile in
                             Text(profile.displayName).tag(profile)
                         }
@@ -225,7 +297,7 @@ struct MountView: View {
                     .frame(maxWidth: .infinity)
                 }
 
-                if let compatibilityDescription = profile.compatibilityDescription {
+                if let compatibilityDescription = form.profile.compatibilityDescription {
                     Text(compatibilityDescription)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -258,29 +330,29 @@ struct MountView: View {
                     Text("Read workers")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper(profile == .git ? "Primary session" : "\(readWorkers)", value: $readWorkers, in: profile == .git ? 0...0 : profile.workerRange)
-                        .disabled(profile == .git)
+                    Stepper(form.profile == .git ? "Primary session" : "\(form.readWorkers)", value: $form.readWorkers, in: form.profile == .git ? 0...0 : form.profile.workerRange)
+                        .disabled(form.profile == .git)
                 }
-                
+
                 HStack {
                     Text("Write workers")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper(profile == .git ? "Primary session" : "\(writeWorkers)", value: $writeWorkers, in: profile == .git ? 0...0 : profile.workerRange)
-                        .disabled(profile == .git)
+                    Stepper(form.profile == .git ? "Primary session" : "\(form.writeWorkers)", value: $form.writeWorkers, in: form.profile == .git ? 0...0 : form.profile.workerRange)
+                        .disabled(form.profile == .git)
                 }
-                
+
                 HStack {
                     Text("I/O Mode")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Picker("", selection: $ioMode) {
+                    Picker("", selection: $form.ioMode) {
                         Text("Blocking").tag(MountIOMode.blocking)
                         Text("Nonblocking").tag(MountIOMode.nonblocking)
                     }
                     .pickerStyle(.menu)
                     .frame(width: 120)
-                    .disabled(profile == .git)
+                    .disabled(form.profile == .git)
                 }
             }
 
@@ -291,21 +363,21 @@ struct MountView: View {
                     Text("Health interval")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper("\(healthInterval)s", value: $healthInterval, in: 1...300)
+                    Stepper("\(form.healthInterval)s", value: $form.healthInterval, in: 1...300)
                 }
-                
+
                 HStack {
                     Text("Health timeout")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper("\(healthTimeout)s", value: $healthTimeout, in: 1...120)
+                    Stepper("\(form.healthTimeout)s", value: $form.healthTimeout, in: 1...120)
                 }
-                
+
                 HStack {
                     Text("Health failures")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper("\(healthFailures)", value: $healthFailures, in: 1...12)
+                    Stepper("\(form.healthFailures)", value: $form.healthFailures, in: 1...12)
                 }
             }
 
@@ -316,16 +388,16 @@ struct MountView: View {
                     Text("Attr cache")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper("\(cacheAttrSeconds)s", value: $cacheAttrSeconds, in: 0...300)
-                        .disabled(profile == .git)
+                    Stepper("\(form.cacheAttrSeconds)s", value: $form.cacheAttrSeconds, in: 0...300)
+                        .disabled(form.profile == .git)
                 }
-                
+
                 HStack {
                     Text("Dir cache")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Stepper("\(cacheDirSeconds)s", value: $cacheDirSeconds, in: 0...300)
-                        .disabled(profile == .git)
+                    Stepper("\(form.cacheDirSeconds)s", value: $form.cacheDirSeconds, in: 0...300)
+                        .disabled(form.profile == .git)
                 }
             }
         }
@@ -344,10 +416,10 @@ struct MountView: View {
                         .foregroundStyle(SSHMountTheme.danger)
                 }
             }
-            
+
             HStack {
                 Spacer()
-                
+
                 Button {
                     onDismiss()
                 } label: {
@@ -409,61 +481,17 @@ struct MountView: View {
         }
     }
 
-    private var resolvedLocalPath: String {
-        localPath.isEmpty ? "" : "~/Volumes/\(localPath)"
-    }
-
     private func hydrateFromEditingConfig() {
         if let config = editing {
-            hostAlias = config.hostAlias
-            remotePath = config.remotePath
-
-            let home = PathUtilities.realHomeDirectory
-            let prefix = home + "/Volumes/"
-            if config.localPath.hasPrefix(prefix) {
-                localPath = String(config.localPath.dropFirst(prefix.count))
-            } else {
-                localPath = config.localPath
-            }
-
-            label = config.label
-            mountOnLaunch = config.mountOnLaunch
-
-            let opts = config.options
-            profile = opts.profile
-            readWorkers = opts.readWorkers
-            writeWorkers = opts.writeWorkers
-            ioMode = opts.ioMode
-            healthInterval = Int(opts.healthInterval.rounded())
-            healthTimeout = Int(opts.healthTimeout.rounded())
-            healthFailures = opts.healthFailures
-            busyThreshold = opts.busyThreshold
-            graceSeconds = Int(opts.graceSeconds.rounded())
-            queueTimeoutMs = opts.queueTimeoutMs
-            cacheAttrSeconds = Int(opts.cacheTimeout.rounded())
-            cacheDirSeconds = Int(opts.dirCacheTimeout.rounded())
-
-            if opts.profile == .git {
-                applyGitProfileOverrides()
-            }
+            form.hydrate(from: config)
         }
 
-        if !hostAlias.isEmpty && !knownHosts.contains(hostAlias) {
-            errorMessage = "Saved host alias '\(hostAlias)' is no longer defined in ~/.ssh/config."
+        if !form.hostAlias.isEmpty && !knownHosts.contains(form.hostAlias) {
+            errorMessage = "Saved host alias '\(form.hostAlias)' is no longer defined in ~/.ssh/config."
         }
-        if !knownHosts.contains(hostAlias), let first = knownHosts.first {
-            hostAlias = first
+        if !knownHosts.contains(form.hostAlias), let first = knownHosts.first {
+            form.hostAlias = first
         }
-    }
-
-    private func applyGitProfileOverrides() {
-        readWorkers = 0
-        writeWorkers = 0
-        ioMode = .blocking
-        cacheAttrSeconds = 0
-        cacheDirSeconds = 0
-        if healthFailures < 7 { healthFailures = 7 }
-        if busyThreshold < 64 { busyThreshold = 64 }
     }
 
     private func loadKnownHosts() {
@@ -487,43 +515,25 @@ struct MountView: View {
 
     private func validateInputs() throws {
         guard hostAliasIsValid else {
-            throw MountError.invalidFormat("Host alias '\(hostAlias)' is not defined in ~/.ssh/config")
+            throw MountError.invalidFormat("Host alias '\(form.hostAlias)' is not defined in ~/.ssh/config")
         }
 
-        let normalizedPath = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedPath = form.remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedPath.isEmpty else {
             throw MountError.invalidFormat("Remote path is required")
         }
-    }
-
-    private func currentOptions() -> MountOptions {
-        MountOptions(
-            profile: profile,
-            readWorkers: readWorkers,
-            writeWorkers: writeWorkers,
-            ioMode: ioMode,
-            healthInterval: TimeInterval(healthInterval),
-            healthTimeout: TimeInterval(healthTimeout),
-            healthFailures: healthFailures,
-            busyThreshold: busyThreshold,
-            graceSeconds: TimeInterval(graceSeconds),
-            queueTimeoutMs: queueTimeoutMs,
-            cacheTimeout: TimeInterval(cacheAttrSeconds),
-            dirCacheTimeout: TimeInterval(cacheDirSeconds),
-            authPassword: nil
-        )
     }
 
     private func buildConfig() throws -> MountConfig {
         try validateInputs()
         return MountConfig(
             id: editing?.id ?? UUID(),
-            label: label,
-            hostAlias: hostAlias,
-            remotePath: remotePath.trimmingCharacters(in: .whitespacesAndNewlines),
-            localPath: resolvedLocalPath,
-            mountOnLaunch: mountOnLaunch,
-            options: currentOptions()
+            label: form.label,
+            hostAlias: form.hostAlias,
+            remotePath: form.remotePath.trimmingCharacters(in: .whitespacesAndNewlines),
+            localPath: form.resolvedLocalPath,
+            mountOnLaunch: form.mountOnLaunch,
+            options: form.currentOptions()
         )
     }
 

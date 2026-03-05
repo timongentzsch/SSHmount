@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct SSHMountApp: App {
-    @StateObject private var mountManager = MountManager()
+    @State private var mountManager = MountManager()
 
     var body: some Scene {
         MenuBarExtra {

@@ -1,9 +1,11 @@
 import Foundation
+import Observation
 
 /// Checks required permissions and setup status.
+@Observable
 @MainActor
-final class PermissionChecker: ObservableObject {
-    @Published var status = PermissionStatus()
+final class PermissionChecker {
+    var status = PermissionStatus()
 
     func refresh() async {
         let installed = FileManager.default.fileExists(atPath: "/Applications/SSHMount.app")
